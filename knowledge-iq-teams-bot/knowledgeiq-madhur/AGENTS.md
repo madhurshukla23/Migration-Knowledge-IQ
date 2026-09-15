@@ -6,7 +6,8 @@ This agent uses the **Activity protocol** (Bot Framework / M365 Agents SDK), so 
 
 ## Key files
 
-- `main.py` — the activity handlers (`message` echoes the user's text; `conversationUpdate` welcomes new members)
+- `main.py` — the activity handlers (`message` answers questions using the Azure DevOps tools via Agent Framework; `conversationUpdate` welcomes new members)
+- `ado_client.py` — Azure DevOps work item and wiki REST client used by the tools
 - `Dockerfile` — container definition
 
 ## Development workflow

@@ -1,46 +1,49 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
 
 requiredVersions:
-  extensions:
-    azure.ai.agents: '>=1.0.0-beta.4'
+    extensions:
+        azure.ai.agents: '>=1.0.0-beta.4'
 name: echo-activity
 services:
-  ai-project:
-    host: azure.ai.project
-  echo-activity:
-    host: azure.ai.agent
-    metadata:
-      tags:
-        - AI Agent Hosting
-        - Activity Protocol
-        - Bring Your Own
-        - Python
-    project: src/echo-activity
-    language: python
-    codeConfiguration:
-      runtime: python_3_13
-      entryPoint: main.py
-    uses:
-      - ai-project
-    kind: hosted
-    name: echo-activity
-    displayName: Echo (Python, Activity)
-    description: >
-      Minimal echo agent using the Activity protocol with a bring-your-own
-      approach. Echoes the user's message back. Uses the M365 Agents SDK for
-      activity processing and outbound channel delivery, hosted by
-      azure-ai-agentserver-activity for the Foundry platform contract.
-    protocols:
-      - protocol: activity
-        version: 2.0.0
-    agentEndpoint:
-      protocols:
-        - activity
-      authorizationSchemes:
-        - type: BotServiceRbac
-    container:
-      resources:
-        cpu: '0.5'
-        memory: 1Gi
+    ai-project:
+        host: azure.ai.project
+        endpoint: https://cog-3y7mapyaibvjm.services.ai.azure.com/api/projects/knowledge-iq-ai
+    echo-activity:
+        project: src/echo-activity
+        host: azure.ai.agent
+        language: docker
+        docker:
+            remoteBuild: true
+        uses:
+            - ai-project
+        agentEndpoint:
+            authorizationSchemes:
+                - type: BotServiceRbac
+            protocols:
+                - activity
+        env:
+            AZURE_AI_MODEL_DEPLOYMENT_NAME: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+            ADO_ORG_URL: ${ADO_ORG_URL}
+            ADO_PROJECT: ${ADO_PROJECT}
+            ADO_PAT: ${ADO_PAT}
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: |
+            Knowledge IQ Teams agent that answers questions using Azure DevOps work items and wiki pages
+            from https://dev.azure.com/madhurshukla, project Caller.
+        displayName: Knowledge IQ Teams Bot (Python, Activity)
+        kind: hosted
+        metadata:
+            tags:
+                - AI Agent Hosting
+                - Activity Protocol
+                - Bring Your Own
+                - Python
+        name: knowledgeiq-madhur
+        protocols:
+            - protocol: activity
+              version: 2.0.0
 infra:
-  provider: microsoft.foundry
+    provider: microsoft.foundry

@@ -2,6 +2,12 @@
 # releases on PyPI. Bump these when a newer beta is needed.
 azure-ai-agentserver-activity==1.0.0b1
 
+# Agent Framework + Foundry model client, used to answer questions with tools.
+agent-framework-foundry
+
+# Azure DevOps REST client dependency.
+requests
+
 # Microsoft 365 Agents SDK
 microsoft-agents-hosting-core
 microsoft-agents-authentication-msal
