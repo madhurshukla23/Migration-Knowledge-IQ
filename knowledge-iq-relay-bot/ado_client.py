@@ -169,3 +169,19 @@ def get_wiki_page(path: str, wiki_identifier: str | None = None) -> dict:
         "content": payload.get("content"),
         "url": f"{_org_url()}/{_project()}/_wiki/wikis/{wiki_id}?path={path}",
     }
+
+
+def create_wiki_page(path: str, content: str) -> dict:
+    """Create a new wiki page at the given path. The path must not already exist."""
+    wiki_id = _default_wiki_identifier()
+    url = (
+        f"{_org_url()}/{_project()}/_apis/wiki/wikis/{wiki_id}/pages"
+        f"?path={path}&api-version={API_VERSION}"
+    )
+    response = requests.put(url, json={"content": content}, auth=_auth(), timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "path": payload.get("path"),
+        "url": f"{_org_url()}/{_project()}/_wiki/wikis/{wiki_id}?pagePath={path}",
+    }

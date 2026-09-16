@@ -133,7 +133,65 @@ Delivered with a simpler live-query architecture instead of the indexed design a
 | Least-privilege Entra app for connectors | Partial | Using a PAT (`ADO_PAT`) rather than a scoped OAuth app; this PAT has been exposed in chat multiple times and should be rotated |
 | Evaluation dataset | Partial | Generated for the Foundry Responses-protocol agent (`knowledge-iq-agent`), not re-run against the Teams relay bot |
 
-Deployed assets: Foundry agent `knowledge-iq-agent` (Responses protocol, ADO-only tools), Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`.
+Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end.
+
+### Actual data flow (as implemented)
+
+The sequence diagram in [Data flow](#data-flow) above reflects the original design (Azure AI Search, ingestion pipeline). What actually runs today is simpler, since every question triggers a live Azure DevOps call instead of a search index query:
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Teams
+    participant BotService as Azure Bot Service
+    participant Function as func-knowledgeiq-relay-cpvzgdnu
+    participant Model as Foundry model gpt-5.4-mini
+    participant ADO as Azure DevOps REST API
+
+    User->>Teams: Ask a question
+    Teams->>BotService: Forward activity
+    BotService->>Function: POST messages, with Bot Framework JWT
+    Function->>Function: Validate JWT, load or create session
+    Function->>Model: Run agent turn with the four ADO tools available
+    Model->>Function: Tool call, e.g. search_wiki or search_work_items
+    Function->>ADO: Live REST call
+    ADO-->>Function: Work items or wiki page content
+    Function->>Model: Tool result
+    Model-->>Function: Final answer with citation
+    Function->>BotService: Send reply activity
+    BotService->>Teams: Deliver reply
+    Teams->>User: Show answer
+```
+
+Component detail:
+
+* Azure Bot resource `knowledgeiq-relay-bot`, registered as SingleTenant, with the Teams channel enabled, and a sideloaded Teams app package (`knowledgeiq-relay-teams-app.zip`) for personal, team, or group chat scope.
+* Entra ID app registration `MicrosoftAppId=0cbb69cf-b392-4451-b99b-eccabed08da3` used for both inbound activity validation and outbound reply authentication.
+* Function App `func-knowledgeiq-relay-cpvzgdnu` (Linux Consumption plan `EastUS2LinuxDynamicPlan`) is the only compute component. Its `messages` route validates every inbound Bot Framework JWT in code, then replies through `ConnectorClient.conversations.send_to_conversation`. It holds an in-memory session dictionary keyed by Teams conversation id, so multi-turn context lasts only for the life of the function instance.
+* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account, no PAT or key needed for the model call itself.
+* An in-process `Agent` (Agent Framework) is built directly inside the Function App using `FoundryChatClient` against Foundry account `cog-3y7mapyaibvjm`, project `knowledge-iq-ai`, model deployment `gpt-5.4-mini`. This is not a separately hosted Foundry agent.
+* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
+
+### Deployed resource inventory
+
+All resources live in resource group `rg-knowledge-iq-agent-dev-005cbe47` (`eastus2`), subscription `f3d6b6b0-1c3e-4194-aced-57f1f90bb945`.
+
+| Resource | Type | Role |
+|---|---|---|
+| `cog-3y7mapyaibvjm` | Microsoft.CognitiveServices/accounts | Foundry account hosting the model deployment |
+| `cog-3y7mapyaibvjm/knowledge-iq-ai` | Microsoft.CognitiveServices/accounts/projects | Foundry project used by the relay bot |
+| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Web/sites | The relay bot's compute |
+| `EastUS2LinuxDynamicPlan` | Microsoft.Web/serverFarms | Consumption hosting plan for the function |
+| `stkiqrelaycpvzgdnu` | Microsoft.Storage/storageAccounts | Function App storage |
+| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Insights/components | Application Insights for the function |
+| `knowledgeiq-relay-bot` | Microsoft.BotService/botServices | Bot Service registration with the Teams channel |
+
+### Known limitations
+
+* Session state is in-memory only. A function restart or scale event loses conversation context.
+* Live Azure DevOps calls on every question will not scale well against a large backlog or wiki, since there is no caching or indexing layer.
+* The Azure DevOps PAT is a single shared credential with read access to the whole project, rather than a scoped app registration. It has been exposed in chat multiple times and should be rotated.
+* No evaluation suite has been run against the relay bot directly. The evaluation suite generated earlier in the project targeted the standalone Foundry agent, which has since been deleted.
 
 ## Feature 2: meeting capture and wiki write-back
 
@@ -175,6 +233,22 @@ sequenceDiagram
 3. Wire the media bot's audio stream into Azure AI Speech for real-time transcription with diarization.
 4. Extend the Foundry agent with a summarization prompt and a wiki write-back tool, reusing the read connector from Feature 1 for the write path.
 5. Add consent and recording-notice handling, since meeting recording triggers organizational compliance and, in many regions, legal notice requirements.
+
+### Implementation status (as of 2026-09-16)
+
+Delivered with a lighter, delegated-auth pivot instead of the live audio-capture design above, since it needs no Teams Administrator role and no new hosting.
+
+| Component | Status | Notes |
+|---|---|---|
+| Delegated sign-in (device code flow) | Done | Uses Microsoft's public "Microsoft Graph Command Line Tools" client, no app registration or Teams Administrator role required |
+| Resolve meeting by join URL | Done | `GET /me/onlineMeetings?$filter=JoinWebUrl eq ...` |
+| Fetch and parse transcript | Done | WebVTT converted to speaker-attributed plain text; only covers meetings the signed-in user organized |
+| Summarize into structured notes | Done | Attendees, Decisions, Action Items, Open Questions, via the same Foundry model |
+| Write summary back to wiki | Done | New `ado_client.create_wiki_page`, path convention `/Meetings/{date}-{subject}` |
+| Teams bot commands (`summarize meeting`, `done`) | Done | Added to the existing relay bot, smoke-tested via Direct Line |
+| End-to-end test against a real Teams meeting | Pending | Needs a real meeting with transcription enabled to fully validate |
+| Live Graph Communications calling bot, real-time audio | Not implemented | The heavier design above; would need a .NET service, since the Graph Calling SDK has no Python support |
+| Org-wide use (reading other users' meetings) | Not implemented | Requires a Teams Administrator to create an application access policy; only the signed-in user's own meetings work today |
 
 ## Feature 3: live meeting suggestions
 
@@ -218,6 +292,14 @@ sequenceDiagram
 2. Reuse the Feature 1 retrieval tool for topic queries, tuning the relevance threshold with recorded meeting samples before enabling auto-respond.
 3. Implement suggestion delivery as proactive messages into the meeting's chat thread through the Bot Framework conversation reference captured at join time.
 4. Start in suggest-only mode for all meetings and require explicit opt-in per team before enabling auto-respond, since incorrect automatic responses are more disruptive than a delayed suggestion.
+
+### Implementation status (as of 2026-09-16)
+
+Not implemented. Two things are verified, the rest is still open:
+
+* Admin consent for `Calls.AccessMedia.All` and `Calls.JoinGroupCall.All` was granted on the relay bot's app registration without issue, confirming this does not require a Teams Administrator role.
+* Whether real-time media access actually works at call time, separate from consent, is unverified. It can only be confirmed by building the .NET Graph Calling SDK client and attempting a live join.
+* A lighter, no-new-permissions alternative is possible today: invite the existing relay bot into a meeting's chat and let users `@mention` it with questions, the same Q&A flow as Feature 1. This only supports on-request answers, not automatic topic detection from live audio.
 
 ## Cross-cutting concerns
 

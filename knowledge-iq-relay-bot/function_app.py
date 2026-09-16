@@ -4,6 +4,8 @@ Azure DevOps knowledge tools used by the Foundry hosted agents."""
 
 import logging
 import os
+import re
+from datetime import datetime, timezone
 
 import azure.functions as func
 from agent_framework import Agent, AgentSession, tool
@@ -20,6 +22,7 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 import ado_client
+import graph_meeting_client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("knowledge-iq-relay-bot")
@@ -104,7 +107,73 @@ _agent = Agent(
 # WARNING: lost on restart. Use durable storage (Redis, Cosmos DB, etc.) in production.
 _sessions: dict[str, AgentSession] = {}
 
+# In-memory pending-device-code state for the "summarize meeting" delegated auth flow.
+# WARNING: lost on restart, same caveat as _sessions above.
+_pending_meeting_auth: dict[str, dict] = {}
+
+_MEETING_COMMAND = re.compile(r"^summarize meeting\s+(https?://\S+)", re.IGNORECASE)
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+
+async def _summarize_transcript(transcript_text: str) -> str:
+    """Turn a raw meeting transcript into structured notes using the model, no tools needed."""
+    summarizer = Agent(
+        client=_chat_client,
+        instructions=(
+            "You turn raw Teams meeting transcripts into concise structured notes with these "
+            "sections: Attendees, Decisions, Action Items, Open Questions. If a section has "
+            "nothing relevant, write 'None noted'. Keep it factual, do not invent details."
+        ),
+        default_options={"store": False},
+    )
+    response = await summarizer.run(transcript_text)
+    return response.text or "Summary generation failed."
+
+
+async def _handle_summarize_meeting(activity: Activity, join_url: str) -> None:
+    device = graph_meeting_client.start_device_code()
+    _pending_meeting_auth[activity.conversation.id] = {
+        "device_code": device["device_code"],
+        "join_url": join_url,
+    }
+    _send_reply(
+        activity,
+        "To read this meeting's transcript I need you to sign in as yourself.\n\n"
+        f"{device['message']}\n\nOnce you're done, reply here with **done**.",
+    )
+
+
+async def _handle_done(activity: Activity) -> None:
+    pending = _pending_meeting_auth.get(activity.conversation.id)
+    if not pending:
+        _send_reply(activity, "I don't have a pending sign-in for this conversation. Start with 'summarize meeting <join url>'.")
+        return
+    result = graph_meeting_client.try_redeem_device_code(pending["device_code"])
+    if result["status"] == "pending":
+        _send_reply(activity, "Still waiting for you to finish signing in. Complete it, then reply 'done' again.")
+        return
+    if result["status"] == "error":
+        _pending_meeting_auth.pop(activity.conversation.id, None)
+        _send_reply(activity, f"Sign-in failed or expired ({result['error']}). Start over with 'summarize meeting <join url>'.")
+        return
+
+    access_token = result["access_token"]
+    join_url = pending["join_url"]
+    _pending_meeting_auth.pop(activity.conversation.id, None)
+    try:
+        meeting = graph_meeting_client.get_online_meeting_by_join_url(access_token, join_url)
+        vtt_content = graph_meeting_client.get_latest_transcript_text(access_token, meeting["id"])
+        transcript_text = graph_meeting_client.vtt_to_text(vtt_content)
+        summary = await _summarize_transcript(transcript_text)
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        subject = (meeting.get("subject") or "meeting").replace(" ", "-")
+        page_path = f"/Meetings/{date_str}-{subject}-{meeting['id'][:8]}"
+        page = ado_client.create_wiki_page(page_path, f"# Meeting notes: {meeting.get('subject')}\n\n{summary}")
+        _send_reply(activity, f"Meeting summarized and posted to the wiki: {page['url']}")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error("[ERROR] Meeting summarization failed: %s", exc, exc_info=True)
+        _send_reply(activity, f"Sorry, I couldn't summarize that meeting: {exc}")
 
 
 def _send_reply(activity: Activity, text: str) -> None:
@@ -142,7 +211,12 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
     try:
         if activity.type == ActivityTypes.message:
             user_text = (activity.text or "").strip()
-            if user_text:
+            meeting_match = _MEETING_COMMAND.match(user_text)
+            if meeting_match:
+                await _handle_summarize_meeting(activity, meeting_match.group(1))
+            elif user_text.lower() == "done" and activity.conversation.id in _pending_meeting_auth:
+                await _handle_done(activity)
+            elif user_text:
                 conversation_id = activity.conversation.id
                 session = _sessions.setdefault(conversation_id, AgentSession(session_id=conversation_id))
                 try:
