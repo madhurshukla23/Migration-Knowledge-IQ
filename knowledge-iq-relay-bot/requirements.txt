@@ -1,0 +1,7 @@
+azure-functions
+botframework-connector>=4.16.0
+botbuilder-schema>=4.16.0
+agent-framework-foundry
+azure-identity
+requests
+python-dotenv

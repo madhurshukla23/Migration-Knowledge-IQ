@@ -116,6 +116,25 @@ sequenceDiagram
 5. Register an Azure Bot Service resource, add the Teams channel, and connect it to the agent.
 6. Add evaluation datasets (sample questions with expected sources) and run the Foundry evaluation workflow before wider rollout.
 
+### Implementation status (as of 2026-09-16)
+
+Delivered with a simpler live-query architecture instead of the indexed design above. Revisit this section before starting Feature 2 or any further Feature 1 work.
+
+| Component | Status | Notes |
+|---|---|---|
+| Azure DevOps work items (search + get by id) | Done | WIQL search over title/description, no work item type filter, so Bugs/Tasks/User Stories are all covered |
+| Azure DevOps wiki (search + get page) | Done | Verified end to end with real content |
+| GitHub issues/PRs/code connector | Not implemented | Descoped early ("assume Azure DevOps wiki as only data source") and never revisited |
+| Azure AI Search hybrid index | Not implemented | Live REST calls per question instead of a pre-built index; works at current scale but will not scale to large wikis/backlogs and has no vector/semantic ranking |
+| Scheduled sync connectors | Not implemented | No ingestion pipeline; no staleness, but also no pre-computed embeddings |
+| Teams chat channel | Done | Delivered via a classic Bot Framework relay (Azure Function) rather than a native Foundry Activity-protocol hosted agent, which was abandoned after an unresolvable preview SDK bug (`azure-ai-agentserver-activity==1.0.0b1`) |
+| Citations back to source | Done | Replies include work item and wiki URLs |
+| Adaptive Cards | Not implemented | Bot replies are plain text |
+| Least-privilege Entra app for connectors | Partial | Using a PAT (`ADO_PAT`) rather than a scoped OAuth app; this PAT has been exposed in chat multiple times and should be rotated |
+| Evaluation dataset | Partial | Generated for the Foundry Responses-protocol agent (`knowledge-iq-agent`), not re-run against the Teams relay bot |
+
+Deployed assets: Foundry agent `knowledge-iq-agent` (Responses protocol, ADO-only tools), Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`.
+
 ## Feature 2: meeting capture and wiki write-back
 
 ### Scope

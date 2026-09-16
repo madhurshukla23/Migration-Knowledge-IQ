@@ -1,0 +1,35 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "ead3e448-b197-45cd-b860-2a778f971b59",
+  "developer": {
+    "name": "Migration Knowledge IQ",
+    "websiteUrl": "https://dev.azure.com/madhurshukla",
+    "privacyUrl": "https://dev.azure.com/madhurshukla",
+    "termsOfUseUrl": "https://dev.azure.com/madhurshukla"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Knowledge IQ",
+    "full": "Knowledge IQ Azure DevOps Assistant"
+  },
+  "description": {
+    "short": "Ask about Azure DevOps work items and wiki pages.",
+    "full": "Knowledge IQ answers questions using Azure DevOps work items and wiki pages from the Caller project."
+  },
+  "accentColor": "#0078D4",
+  "bots": [
+    {
+      "botId": "0cbb69cf-b392-4451-b99b-eccabed08da3",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}
