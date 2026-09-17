@@ -7,6 +7,7 @@ with the text-embedding-3-small deployment on the same Foundry account used
 for chat, authenticated with the Function App's managed identity.
 """
 
+import hashlib
 import os
 
 import requests
@@ -69,15 +70,37 @@ def _upload_documents(documents: list[dict]) -> None:
         client.merge_or_upload_documents(documents=documents[i : i + 100])
 
 
+def _prune_stale_documents(source: str, valid_ids: set[str]) -> int:
+    """Delete indexed documents for a source that no longer correspond to current content."""
+    client = _search_client()
+    existing_ids = {
+        result["id"]
+        for result in client.search(search_text="*", filter=f"source eq '{source}'", select=["id"], top=100000)
+    }
+    stale_ids = existing_ids - valid_ids
+    if not stale_ids:
+        return 0
+    client.delete_documents(documents=[{"id": stale_id} for stale_id in stale_ids])
+    return len(stale_ids)
+
+
+def _stable_id(path: str) -> str:
+    """A doc-id-safe hash that is stable across processes (unlike Python's built-in hash())."""
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
 def sync_work_items() -> int:
     """Index every work item in the project. Returns the number of chunks indexed."""
     documents = []
+    valid_ids: set[str] = set()
     for item in ado_client.list_all_work_items():
         text = f"{item['title']}\n\n{item.get('description') or ''}"
         for chunk_index, chunk in enumerate(_chunk_text(text)):
+            doc_id = f"wi-{item['id']}-{chunk_index}"
+            valid_ids.add(doc_id)
             documents.append(
                 {
-                    "id": f"wi-{item['id']}-{chunk_index}",
+                    "id": doc_id,
                     "source": "ado_work_item",
                     "title": item["title"],
                     "url": item["url"],
@@ -88,17 +111,21 @@ def sync_work_items() -> int:
                 }
             )
     _upload_documents(documents)
+    _prune_stale_documents("ado_work_item", valid_ids)
     return len(documents)
 
 
 def sync_wiki() -> int:
     """Index every wiki page in the project. Returns the number of chunks indexed."""
     documents = []
+    valid_ids: set[str] = set()
     for page in ado_client.list_all_wiki_pages():
         for chunk_index, chunk in enumerate(_chunk_text(page.get("content") or "")):
+            doc_id = f"wiki-{_stable_id(page['path'])}-{chunk_index}"
+            valid_ids.add(doc_id)
             documents.append(
                 {
-                    "id": f"wiki-{abs(hash(page['path']))}-{chunk_index}",
+                    "id": doc_id,
                     "source": "ado_wiki",
                     "title": page["path"],
                     "url": page["url"],
@@ -109,6 +136,7 @@ def sync_wiki() -> int:
                 }
             )
     _upload_documents(documents)
+    _prune_stale_documents("ado_wiki", valid_ids)
     return len(documents)
 
 
