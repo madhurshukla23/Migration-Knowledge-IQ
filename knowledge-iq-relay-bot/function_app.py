@@ -11,7 +11,7 @@ import azure.functions as func
 from agent_framework import Agent, AgentSession, tool
 from agent_framework.foundry import FoundryChatClient
 from azure.identity import DefaultAzureCredential
-from botbuilder.schema import Activity, ActivityTypes
+from botbuilder.schema import Activity, ActivityTypes, Attachment
 from botframework.connector import ConnectorClient
 from botframework.connector.auth import (
     JwtTokenValidation,
@@ -206,6 +206,42 @@ def _send_reply(activity: Activity, text: str) -> None:
     connector.conversations.send_to_conversation(activity.conversation.id, reply)
 
 
+_URL_PATTERN = re.compile(r"https?://[^\s)>\]]+")
+
+
+def _build_answer_card(text: str) -> dict:
+    """An Adaptive Card with the answer text plus clickable buttons for any cited source URLs."""
+    urls = list(dict.fromkeys(url.rstrip(".,;:") for url in _URL_PATTERN.findall(text)))[:3]
+    card: dict = {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": [{"type": "TextBlock", "text": text, "wrap": True}],
+    }
+    if urls:
+        card["actions"] = [
+            {"type": "Action.OpenUrl", "title": f"Open source {i + 1}", "url": url} for i, url in enumerate(urls)
+        ]
+    return card
+
+
+def _send_card_reply(activity: Activity, text: str) -> None:
+    """Reply with the answer rendered as an Adaptive Card, with source links as buttons."""
+    attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=_build_answer_card(text))
+    reply = Activity(
+        type=ActivityTypes.message,
+        attachments=[attachment],
+        from_property=activity.recipient,
+        recipient=activity.from_property,
+        conversation=activity.conversation,
+        reply_to_id=activity.id,
+        service_url=activity.service_url,
+    )
+    MicrosoftAppCredentials.trust_service_url(activity.service_url)
+    connector = ConnectorClient(_app_credentials, base_url=activity.service_url)
+    connector.conversations.send_to_conversation(activity.conversation.id, reply)
+
+
 @app.timer_trigger(schedule="0 0 */6 * * *", arg_name="timer", run_on_startup=False)
 def scheduled_reindex(timer: func.TimerRequest) -> None:
     """Refresh the search index from Azure DevOps every 6 hours."""
@@ -254,7 +290,7 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
                 except Exception as exc:  # pylint: disable=broad-exception-caught
                     logger.error("[ERROR] Agent run failed: %s", exc, exc_info=True)
                     reply_text = f"Sorry, I hit an error answering that: {exc}"
-                _send_reply(activity, reply_text)
+                _send_card_reply(activity, reply_text)
         elif activity.type == ActivityTypes.conversation_update:
             for member in activity.members_added or []:
                 if member.id != activity.recipient.id:
