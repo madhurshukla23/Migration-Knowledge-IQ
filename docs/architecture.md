@@ -33,7 +33,134 @@ The plan below is organized into three phases that map to the three requested fe
 | Secrets and identity | Microsoft Entra ID app registrations, Azure Key Vault, managed identity | Avoids storing PATs or client secrets in code |
 | Hosting | Azure Container Apps for the bot and media processing services | Scales independently, supports the long-running media bot process separately from the chat bot |
 
-## High-level architecture
+## Current flow
+
+What is actually deployed as of 2026-09-17: a single Azure Function doing double duty as the Q&A agent and the meeting-summarization orchestrator. There is no search index, no GitHub connector, and no live-audio meeting bot.
+
+```mermaid
+flowchart TB
+    User[Teams user]
+
+    subgraph BotLayer[Bot layer]
+        BotService[Azure Bot Service]
+        Function[func-knowledgeiq-relay-cpvzgdnu]
+    end
+
+    Model[Foundry model gpt-5.4-mini]
+    ADO[Azure DevOps work items and wiki]
+
+    subgraph MeetingAuth[Meeting summarization]
+        MSIdentity[Microsoft identity platform device code]
+        Graph[Microsoft Graph online meetings and transcripts]
+    end
+
+    User <--> BotService <--> Function
+    Function <--> Model
+    Function <--> ADO
+    Function --> MSIdentity
+    Function <--> Graph
+    Graph -- summary written back --> ADO
+```
+
+### Chat Q&A turn
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Teams
+    participant BotService as Azure Bot Service
+    participant Function as func-knowledgeiq-relay-cpvzgdnu
+    participant Model as Foundry model gpt-5.4-mini
+    participant ADO as Azure DevOps REST API
+
+    User->>Teams: Ask a question
+    Teams->>BotService: Forward activity
+    BotService->>Function: POST messages, with Bot Framework JWT
+    Function->>Function: Validate JWT, load or create session
+    Function->>Model: Run agent turn with the four ADO tools available
+    Model->>Function: Tool call, e.g. search_wiki or search_work_items
+    Function->>ADO: Live REST call
+    ADO-->>Function: Work items or wiki page content
+    Function->>Model: Tool result
+    Model-->>Function: Final answer with citation
+    Function->>BotService: Send reply activity
+    BotService->>Teams: Deliver reply
+    Teams->>User: Show answer
+```
+
+* Azure Bot resource `knowledgeiq-relay-bot`, registered as SingleTenant, with the Teams channel enabled, and a sideloaded Teams app package (`knowledgeiq-relay-teams-app.zip`) for personal, team, or group chat scope.
+* Entra ID app registration `MicrosoftAppId=0cbb69cf-b392-4451-b99b-eccabed08da3` used for both inbound activity validation and outbound reply authentication.
+* Function App `func-knowledgeiq-relay-cpvzgdnu` (Linux Consumption plan `EastUS2LinuxDynamicPlan`) is the only compute component. Its `messages` route validates every inbound Bot Framework JWT in code, then replies through `ConnectorClient.conversations.send_to_conversation`. It holds an in-memory session dictionary keyed by Teams conversation id, so multi-turn context lasts only for the life of the function instance.
+* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account, no PAT or key needed for the model call itself.
+* An in-process `Agent` (Agent Framework) is built directly inside the Function App using `FoundryChatClient` against Foundry account `cog-3y7mapyaibvjm`, project `knowledge-iq-ai`, model deployment `gpt-5.4-mini`. This is not a separately hosted Foundry agent.
+* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
+
+### Meeting summarization turn
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Teams
+    participant BotService as Azure Bot Service
+    participant Function as func-knowledgeiq-relay-cpvzgdnu
+    participant MSIdentity as Microsoft identity platform
+    participant Graph as Microsoft Graph
+    participant Model as Foundry model gpt-5.4-mini
+    participant Wiki as Azure DevOps Wiki
+
+    User->>Teams: summarize meeting <join url>
+    Teams->>BotService: Forward activity
+    BotService->>Function: POST messages
+    Function->>MSIdentity: Request device code
+    MSIdentity-->>Function: User code and verification URL
+    Function->>Teams: Reply with sign-in code
+    User->>MSIdentity: Sign in and enter code in a browser
+    User->>Teams: done
+    Teams->>Function: POST messages
+    Function->>MSIdentity: Redeem device code
+    MSIdentity-->>Function: Delegated access token
+    Function->>Graph: Resolve meeting by join URL
+    Function->>Graph: Get transcript content
+    Graph-->>Function: WebVTT transcript
+    Function->>Model: Summarize transcript
+    Model-->>Function: Structured notes
+    Function->>Wiki: Create /Meetings/{date}-{subject} page
+    Function->>BotService: Reply with wiki link
+    BotService->>Teams: Deliver reply
+    Teams->>User: Show summary link
+```
+
+* `graph_meeting_client.py` implements the device code request/redeem and the Graph calls, using Microsoft's public "Microsoft Graph Command Line Tools" client. No app registration change or Teams Administrator role is required.
+* Pending sign-in state (`device_code`, `join_url`) is stored per conversation in an Azure Table Storage table (`PendingMeetingAuth`), reusing the Function App's existing storage account (`AzureWebJobsStorage`), not in memory, so it survives across the two separate requests the flow needs.
+* `ado_client.create_wiki_page` writes the summary, reusing the same PAT-authenticated client as the Q&A read path. The meeting subject is slugified before use in the page path to avoid characters ADO wiki paths reject.
+* Only meetings the signed-in user personally organized can be read, since this uses the delegated `/me/onlineMeetings` scope. Reading other users' meetings would need an application-permission flow gated behind a Teams Administrator-only application access policy.
+* In one production tenant tested, this sign-in was rejected by a Conditional Access policy restricting the authentication flow; it succeeded cleanly in a separate Microsoft 365 developer/test tenant, confirming the block is tenant policy, not an issue with this implementation.
+
+### Deployed resource inventory
+
+All resources live in resource group `rg-knowledge-iq-agent-dev-005cbe47` (`eastus2`), subscription `f3d6b6b0-1c3e-4194-aced-57f1f90bb945`.
+
+| Resource | Type | Role |
+|---|---|---|
+| `cog-3y7mapyaibvjm` | Microsoft.CognitiveServices/accounts | Foundry account hosting the model deployment |
+| `cog-3y7mapyaibvjm/knowledge-iq-ai` | Microsoft.CognitiveServices/accounts/projects | Foundry project used by the relay bot |
+| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Web/sites | The relay bot's compute |
+| `EastUS2LinuxDynamicPlan` | Microsoft.Web/serverFarms | Consumption hosting plan for the function |
+| `stkiqrelaycpvzgdnu` | Microsoft.Storage/storageAccounts | Function App storage, also backs the pending-meeting-auth table |
+| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Insights/components | Application Insights for the function |
+| `knowledgeiq-relay-bot` | Microsoft.BotService/botServices | Bot Service registration with the Teams channel |
+
+### Known limitations
+
+* Q&A session state is in-memory only. A function restart or scale event loses conversation context.
+* Live Azure DevOps calls on every question will not scale well against a large backlog or wiki, since there is no caching or indexing layer.
+* The Azure DevOps PAT is a single shared credential with read access to the whole project, rather than a scoped app registration. It has been exposed in chat multiple times and should be rotated.
+* No evaluation suite has been run against the relay bot directly. The evaluation suite generated earlier in the project targeted the standalone Foundry agent, which has since been deleted.
+* Meeting summarization only works for meetings the signed-in user personally organized, and can be blocked entirely by a tenant's Conditional Access policy.
+
+## Final flow (end result)
+
+The required architecture once Feature 1, Feature 2, and Feature 3 are all fully implemented. This combines the original Feature 1 design (search index, GitHub connector) with Feature 2's live-audio meeting bot and Feature 3's live-suggestion loop into one target picture. This is what the phased build-out below works toward, not what is running today.
 
 ```mermaid
 flowchart TB
@@ -65,8 +192,9 @@ flowchart TB
     Search --> Agent
     Agent --> ChatBot
     Agent --> MeetingBot
-    MeetingBot -- transcript --> Agent
-    Agent -- meeting notes --> Wiki
+    MeetingBot -- live transcript --> Agent
+    Agent -- live suggestion --> MeetingBot
+    Agent -- meeting notes after call ends --> Wiki
 ```
 
 ## Feature 1: knowledge Q&A (MVP)
@@ -85,27 +213,6 @@ Users chat with the bot in Teams (or a test console) and ask questions about wor
 * An Azure AI Search index configured for hybrid search (vector plus keyword) with metadata filters for source type, project, and date.
 * A Foundry hosted agent with a retrieval tool bound to the search index, plus source-specific tools (get work item by id, get PR by number) for direct lookups that do not require semantic search.
 * A Bot Framework bot registered in Azure Bot Service and published to Teams, forwarding user messages to the agent and rendering citations as Adaptive Cards.
-
-### Data flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Bot as Teams Chat Bot
-    participant Agent as Foundry Agent
-    participant Search as Azure AI Search
-    participant ADO as Azure DevOps / GitHub / Wiki
-
-    User->>Bot: Ask a question
-    Bot->>Agent: Forward message
-    Agent->>Search: Hybrid query
-    Search-->>Agent: Ranked passages with source links
-    Agent->>Agent: Compose grounded answer
-    Agent-->>Bot: Answer plus citations
-    Bot-->>User: Render answer
-
-    Note over ADO,Search: Ingestion runs on a schedule, independent of user queries
-```
 
 ### Build steps
 
@@ -133,65 +240,7 @@ Delivered with a simpler live-query architecture instead of the indexed design a
 | Least-privilege Entra app for connectors | Partial | Using a PAT (`ADO_PAT`) rather than a scoped OAuth app; this PAT has been exposed in chat multiple times and should be rotated |
 | Evaluation dataset | Partial | Generated for the Foundry Responses-protocol agent (`knowledge-iq-agent`), not re-run against the Teams relay bot |
 
-Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end.
-
-### Actual data flow (as implemented)
-
-The sequence diagram in [Data flow](#data-flow) above reflects the original design (Azure AI Search, ingestion pipeline). What actually runs today is simpler, since every question triggers a live Azure DevOps call instead of a search index query:
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Teams
-    participant BotService as Azure Bot Service
-    participant Function as func-knowledgeiq-relay-cpvzgdnu
-    participant Model as Foundry model gpt-5.4-mini
-    participant ADO as Azure DevOps REST API
-
-    User->>Teams: Ask a question
-    Teams->>BotService: Forward activity
-    BotService->>Function: POST messages, with Bot Framework JWT
-    Function->>Function: Validate JWT, load or create session
-    Function->>Model: Run agent turn with the four ADO tools available
-    Model->>Function: Tool call, e.g. search_wiki or search_work_items
-    Function->>ADO: Live REST call
-    ADO-->>Function: Work items or wiki page content
-    Function->>Model: Tool result
-    Model-->>Function: Final answer with citation
-    Function->>BotService: Send reply activity
-    BotService->>Teams: Deliver reply
-    Teams->>User: Show answer
-```
-
-Component detail:
-
-* Azure Bot resource `knowledgeiq-relay-bot`, registered as SingleTenant, with the Teams channel enabled, and a sideloaded Teams app package (`knowledgeiq-relay-teams-app.zip`) for personal, team, or group chat scope.
-* Entra ID app registration `MicrosoftAppId=0cbb69cf-b392-4451-b99b-eccabed08da3` used for both inbound activity validation and outbound reply authentication.
-* Function App `func-knowledgeiq-relay-cpvzgdnu` (Linux Consumption plan `EastUS2LinuxDynamicPlan`) is the only compute component. Its `messages` route validates every inbound Bot Framework JWT in code, then replies through `ConnectorClient.conversations.send_to_conversation`. It holds an in-memory session dictionary keyed by Teams conversation id, so multi-turn context lasts only for the life of the function instance.
-* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account, no PAT or key needed for the model call itself.
-* An in-process `Agent` (Agent Framework) is built directly inside the Function App using `FoundryChatClient` against Foundry account `cog-3y7mapyaibvjm`, project `knowledge-iq-ai`, model deployment `gpt-5.4-mini`. This is not a separately hosted Foundry agent.
-* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
-
-### Deployed resource inventory
-
-All resources live in resource group `rg-knowledge-iq-agent-dev-005cbe47` (`eastus2`), subscription `f3d6b6b0-1c3e-4194-aced-57f1f90bb945`.
-
-| Resource | Type | Role |
-|---|---|---|
-| `cog-3y7mapyaibvjm` | Microsoft.CognitiveServices/accounts | Foundry account hosting the model deployment |
-| `cog-3y7mapyaibvjm/knowledge-iq-ai` | Microsoft.CognitiveServices/accounts/projects | Foundry project used by the relay bot |
-| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Web/sites | The relay bot's compute |
-| `EastUS2LinuxDynamicPlan` | Microsoft.Web/serverFarms | Consumption hosting plan for the function |
-| `stkiqrelaycpvzgdnu` | Microsoft.Storage/storageAccounts | Function App storage |
-| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Insights/components | Application Insights for the function |
-| `knowledgeiq-relay-bot` | Microsoft.BotService/botServices | Bot Service registration with the Teams channel |
-
-### Known limitations
-
-* Session state is in-memory only. A function restart or scale event loses conversation context.
-* Live Azure DevOps calls on every question will not scale well against a large backlog or wiki, since there is no caching or indexing layer.
-* The Azure DevOps PAT is a single shared credential with read access to the whole project, rather than a scoped app registration. It has been exposed in chat multiple times and should be rotated.
-* No evaluation suite has been run against the relay bot directly. The evaluation suite generated earlier in the project targeted the standalone Foundry agent, which has since been deleted.
+Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end. See [Current flow](#current-flow) for the diagrams, resource inventory, and known limitations.
 
 ## Feature 2: meeting capture and wiki write-back
 
@@ -205,26 +254,6 @@ Users invite the bot to a Teams meeting. The bot joins as a media-enabled partic
 * Azure AI Speech real-time transcription with diarization, streaming meeting audio to text with speaker labels.
 * A post-meeting summarization step where the Foundry agent turns the raw transcript into structured notes: attendees, decisions, action items, open questions.
 * A wiki write-back tool that calls the Azure DevOps Wiki REST API to create or update a page under a configured path (for example `/Meetings/{date}-{title}`).
-
-### Data flow
-
-```mermaid
-sequenceDiagram
-    participant Organizer
-    participant Teams as Teams Meeting
-    participant MeetingBot as Meeting Bot (Graph Calling)
-    participant Speech as Azure AI Speech
-    participant Agent as Foundry Agent
-    participant Wiki as Azure DevOps Wiki
-
-    Organizer->>Teams: Invite bot to meeting
-    Teams->>MeetingBot: Bot joins with media access
-    MeetingBot->>Speech: Stream audio
-    Speech-->>MeetingBot: Transcript with speaker labels
-    MeetingBot->>Agent: Full transcript at meeting end
-    Agent->>Agent: Summarize into notes and action items
-    Agent->>Wiki: Create or update meeting page
-```
 
 ### Build steps
 
@@ -250,6 +279,8 @@ Delivered with a lighter, delegated-auth pivot instead of the live audio-capture
 | Live Graph Communications calling bot, real-time audio | Not implemented | The heavier design above; would need a .NET service, since the Graph Calling SDK has no Python support |
 | Org-wide use (reading other users' meetings) | Not implemented | Requires a Teams Administrator to create an application access policy; only the signed-in user's own meetings work today |
 
+See [Current flow](#current-flow) for the meeting summarization sequence diagram and component detail.
+
 ## Feature 3: live meeting suggestions
 
 ### Scope
@@ -262,29 +293,6 @@ While the bot is in the meeting, it continuously compares the live transcript ag
 * A relevance gate that only triggers a suggestion when search results exceed a confidence threshold, to avoid noisy or irrelevant interruptions.
 * A meeting chat responder that posts suggestions as Adaptive Cards in the meeting chat through the Bot Framework conversation tied to that meeting.
 * A configuration setting per meeting or per team for auto-respond versus suggest-only mode.
-
-### Data flow
-
-```mermaid
-sequenceDiagram
-    participant MeetingBot as Meeting Bot
-    participant Speech as Azure AI Speech
-    participant Agent as Foundry Agent
-    participant Search as Azure AI Search
-    participant Chat as Meeting Chat
-
-    loop Rolling transcript window
-        MeetingBot->>Speech: Stream audio
-        Speech-->>Agent: Partial transcript window
-        Agent->>Search: Query current topic
-        Search-->>Agent: Candidate passages with scores
-        alt Score above threshold
-            Agent->>Chat: Post suggestion or auto-response card
-        else Below threshold
-            Agent->>Agent: Discard, wait for next window
-        end
-    end
-```
 
 ### Build steps
 
