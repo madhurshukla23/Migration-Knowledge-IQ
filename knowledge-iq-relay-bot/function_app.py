@@ -23,6 +23,7 @@ from typing_extensions import Annotated
 
 import ado_client
 import graph_meeting_client
+import meeting_auth_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("knowledge-iq-relay-bot")
@@ -107,13 +108,16 @@ _agent = Agent(
 # WARNING: lost on restart. Use durable storage (Redis, Cosmos DB, etc.) in production.
 _sessions: dict[str, AgentSession] = {}
 
-# In-memory pending-device-code state for the "summarize meeting" delegated auth flow.
-# WARNING: lost on restart, same caveat as _sessions above.
-_pending_meeting_auth: dict[str, dict] = {}
-
 _MEETING_COMMAND = re.compile(r"^summarize meeting\s+(https?://\S+)", re.IGNORECASE)
+_SLUG_INVALID_CHARS = re.compile(r"[^A-Za-z0-9-]+")
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+
+def _slugify(text: str, max_length: int = 50) -> str:
+    """Turn arbitrary text into a wiki-path-safe slug (ADO wiki paths reject /, \\, :, etc.)."""
+    slug = _SLUG_INVALID_CHARS.sub("-", text).strip("-")
+    return (slug or "meeting")[:max_length]
 
 
 async def _summarize_transcript(transcript_text: str) -> str:
@@ -133,10 +137,7 @@ async def _summarize_transcript(transcript_text: str) -> str:
 
 async def _handle_summarize_meeting(activity: Activity, join_url: str) -> None:
     device = graph_meeting_client.start_device_code()
-    _pending_meeting_auth[activity.conversation.id] = {
-        "device_code": device["device_code"],
-        "join_url": join_url,
-    }
+    meeting_auth_store.save_pending(activity.conversation.id, device["device_code"], join_url)
     _send_reply(
         activity,
         "To read this meeting's transcript I need you to sign in as yourself.\n\n"
@@ -145,7 +146,7 @@ async def _handle_summarize_meeting(activity: Activity, join_url: str) -> None:
 
 
 async def _handle_done(activity: Activity) -> None:
-    pending = _pending_meeting_auth.get(activity.conversation.id)
+    pending = meeting_auth_store.get_pending(activity.conversation.id)
     if not pending:
         _send_reply(activity, "I don't have a pending sign-in for this conversation. Start with 'summarize meeting <join url>'.")
         return
@@ -154,21 +155,21 @@ async def _handle_done(activity: Activity) -> None:
         _send_reply(activity, "Still waiting for you to finish signing in. Complete it, then reply 'done' again.")
         return
     if result["status"] == "error":
-        _pending_meeting_auth.pop(activity.conversation.id, None)
+        meeting_auth_store.delete_pending(activity.conversation.id)
         _send_reply(activity, f"Sign-in failed or expired ({result['error']}). Start over with 'summarize meeting <join url>'.")
         return
 
     access_token = result["access_token"]
     join_url = pending["join_url"]
-    _pending_meeting_auth.pop(activity.conversation.id, None)
+    meeting_auth_store.delete_pending(activity.conversation.id)
     try:
         meeting = graph_meeting_client.get_online_meeting_by_join_url(access_token, join_url)
         vtt_content = graph_meeting_client.get_latest_transcript_text(access_token, meeting["id"])
         transcript_text = graph_meeting_client.vtt_to_text(vtt_content)
         summary = await _summarize_transcript(transcript_text)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        subject = (meeting.get("subject") or "meeting").replace(" ", "-")
-        page_path = f"/Meetings/{date_str}-{subject}-{meeting['id'][:8]}"
+        subject_slug = _slugify(meeting.get("subject") or "meeting")
+        page_path = f"/Meetings/{date_str}-{subject_slug}-{meeting['id'][:8]}"
         page = ado_client.create_wiki_page(page_path, f"# Meeting notes: {meeting.get('subject')}\n\n{summary}")
         _send_reply(activity, f"Meeting summarized and posted to the wiki: {page['url']}")
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -214,7 +215,7 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
             meeting_match = _MEETING_COMMAND.match(user_text)
             if meeting_match:
                 await _handle_summarize_meeting(activity, meeting_match.group(1))
-            elif user_text.lower() == "done" and activity.conversation.id in _pending_meeting_auth:
+            elif user_text.lower() == "done":
                 await _handle_done(activity)
             elif user_text:
                 conversation_id = activity.conversation.id

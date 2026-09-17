@@ -3,5 +3,6 @@ botframework-connector>=4.16.0
 botbuilder-schema>=4.16.0
 agent-framework-foundry
 azure-identity
+azure-data-tables
 requests
 python-dotenv
