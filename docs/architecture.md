@@ -121,7 +121,45 @@ Delivered with a lighter, delegated-auth pivot instead of the live audio-capture
 | Live Graph Communications calling bot, real-time audio | Not implemented | The heavier design above; would need a .NET service, since the Graph Calling SDK has no Python support |
 | Org-wide use (reading other users' meetings) | Not implemented | Requires a Teams Administrator to create an application access policy; only the signed-in user's own meetings work today |
 
-See [Current flow](#current-flow) for the meeting summarization sequence diagram and component detail.
+### Architecture diagram (as implemented)
+
+This is the delegated, post-meeting pivot that is actually deployed today, not the live-audio calling bot described in Components/Build steps above.
+
+```mermaid
+flowchart LR
+    U[Teams user]
+
+    subgraph Bot[func-knowledgeiq-relay-cpvzgdnu]
+        H[Meeting command handler]
+        AuthStore[(PendingMeetingAuth table\nAzure Table Storage)]
+        Summarizer[Foundry summarizer\ngpt-5.4-mini]
+    end
+
+    MS[Microsoft identity platform\ndevice code flow]
+    Graph[Microsoft Graph\nonlineMeetings + transcripts]
+    Wiki[(Azure DevOps Wiki)]
+
+    U -- "1. summarize meeting url" --> H
+    H -- "2. save device code + join url" --> AuthStore
+    H -- "3. request device code" --> MS
+    MS -- "4. code + verification url" --> H
+    H -- "5. reply with sign-in code" --> U
+    U -- "6. sign in in browser" --> MS
+    U -- "7. done" --> H
+    H -- "8. load pending state" --> AuthStore
+    H -- "9. redeem device code" --> MS
+    MS -- "10. delegated access token" --> H
+    H -- "11. resolve meeting, get transcript" --> Graph
+    Graph -- "12. WebVTT transcript" --> H
+    H -- "13. transcript text" --> Summarizer
+    Summarizer -- "14. structured notes" --> H
+    H -- "15. create /Meetings/date-subject page" --> Wiki
+    H -- "16. reply with wiki link" --> U
+```
+
+Real-time audio capture (the bot joining as a live participant) is not represented here because it is not implemented — see the "Not implemented" rows above.
+
+See [Current flow](#current-flow) for the turn-by-turn sequence diagram and component detail.
 
 ## Feature 3: live meeting suggestions
 
