@@ -4,5 +4,6 @@ botbuilder-schema>=4.16.0
 agent-framework-foundry
 azure-identity
 azure-data-tables
+azure-search-documents
 requests
 python-dotenv

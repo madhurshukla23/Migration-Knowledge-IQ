@@ -45,7 +45,8 @@ def search_work_items(query_text: str, top: int = 10) -> list[dict]:
             f"WHERE [System.TeamProject] = '{_project()}' "
             # CONTAINS (not CONTAINS WORDS) works without the Work Item Search extension installed.
             f"AND ([System.Title] CONTAINS '{safe_query}' "
-            f"OR [System.Description] CONTAINS '{safe_query}') "
+            f"OR [System.Description] CONTAINS '{safe_query}' "
+            f"OR [System.Tags] CONTAINS '{safe_query}') "
             "ORDER BY [System.ChangedDate] DESC"
         )
     }
@@ -63,6 +64,21 @@ def get_work_item(work_item_id: int) -> dict:
     if not items:
         raise ValueError(f"Work item {work_item_id} was not found.")
     return items[0]
+
+
+def list_all_work_items() -> list[dict]:
+    """List every work item in the project, for indexing purposes."""
+    wiql_url = f"{_org_url()}/{_project()}/_apis/wit/wiql?api-version={API_VERSION}"
+    wiql = {"query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{_project()}'"}
+    response = requests.post(wiql_url, json=wiql, auth=_auth(), timeout=30)
+    response.raise_for_status()
+    ids = [str(item["id"]) for item in response.json().get("workItems", [])]
+    if not ids:
+        return []
+    results = []
+    for i in range(0, len(ids), 200):
+        results.extend(_get_work_items_by_ids(ids[i : i + 200]))
+    return results
 
 
 def _get_work_items_by_ids(ids: list[str]) -> list[dict]:
@@ -185,3 +201,12 @@ def create_wiki_page(path: str, content: str) -> dict:
         "path": payload.get("path"),
         "url": f"{_org_url()}/{_project()}/_wiki/wikis/{wiki_id}?pagePath={path}",
     }
+
+
+def list_all_wiki_pages() -> list[dict]:
+    """Get every wiki page's full content, for indexing purposes."""
+    wiki_id = _default_wiki_identifier()
+    pages = []
+    for path in _list_wiki_paths(wiki_id):
+        pages.append(get_wiki_page(path, wiki_id))
+    return pages

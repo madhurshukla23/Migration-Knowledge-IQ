@@ -24,6 +24,7 @@ from typing_extensions import Annotated
 import ado_client
 import graph_meeting_client
 import meeting_auth_store
+import search_indexer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("knowledge-iq-relay-bot")
@@ -36,6 +37,17 @@ APP_PASSWORD = os.environ["MicrosoftAppPassword"]
 APP_TENANT_ID = os.environ["MicrosoftAppTenantId"]
 _credential_provider = SimpleCredentialProvider(APP_ID, APP_PASSWORD)
 _app_credentials = MicrosoftAppCredentials(APP_ID, APP_PASSWORD, channel_auth_tenant=APP_TENANT_ID)
+
+
+@tool(approval_mode="never_require")
+def search_knowledge_base(
+    query: Annotated[str, Field(description="Natural language question or keywords to search the indexed Azure DevOps knowledge base.")],
+) -> str:
+    """Hybrid vector and keyword search over indexed Azure DevOps work items and wiki pages. Prefer this over the live search tools when possible."""
+    results = search_indexer.search(query)
+    if not results:
+        return "No indexed content matched that query."
+    return "\n\n".join(f"[{item['source']}] {item['title']} ({item['url']}):\n{item['text']}" for item in results)
 
 
 @tool(approval_mode="never_require")
@@ -95,12 +107,14 @@ _agent = Agent(
     client=_chat_client,
     instructions=(
         "You are Knowledge IQ, an assistant that answers questions using this team's Azure DevOps "
-        "work items and wiki. Use the search tools to find relevant items or pages before answering, "
-        "then use the get tools to pull full details. Always cite the work item id or wiki page path "
-        "and url in your answer. If nothing relevant is found, say so instead of guessing. Keep Teams "
-        "replies concise."
+        "work items and wiki. Prefer search_knowledge_base first, since it searches indexed content "
+        "semantically. Fall back to search_work_items or search_wiki only if the knowledge base has "
+        "nothing relevant, since those hit Azure DevOps live and may be slower. Use the get tools to "
+        "pull full details once you have a specific id or path. Always cite the work item id or wiki "
+        "page path and url in your answer. If nothing relevant is found, say so instead of guessing. "
+        "Keep Teams replies concise."
     ),
-    tools=[search_work_items, get_work_item, search_wiki, get_wiki_page],
+    tools=[search_knowledge_base, search_work_items, get_work_item, search_wiki, get_wiki_page],
     default_options={"store": False},
 )
 
@@ -192,6 +206,13 @@ def _send_reply(activity: Activity, text: str) -> None:
     connector.conversations.send_to_conversation(activity.conversation.id, reply)
 
 
+@app.timer_trigger(schedule="0 0 */6 * * *", arg_name="timer", run_on_startup=False)
+def scheduled_reindex(timer: func.TimerRequest) -> None:
+    """Refresh the search index from Azure DevOps every 6 hours."""
+    counts = search_indexer.sync_all()
+    logger.info("[REINDEX] work_item_chunks=%s wiki_chunks=%s", counts["work_item_chunks"], counts["wiki_chunks"])
+
+
 @app.route(route="messages", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 async def messages(req: func.HttpRequest) -> func.HttpResponse:
     """Bot Framework messaging endpoint."""
@@ -217,6 +238,13 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
                 await _handle_summarize_meeting(activity, meeting_match.group(1))
             elif user_text.lower() == "done":
                 await _handle_done(activity)
+            elif user_text.lower() == "reindex now":
+                try:
+                    counts = search_indexer.sync_all()
+                    _send_reply(activity, f"Reindexed {counts['work_item_chunks']} work item chunks and {counts['wiki_chunks']} wiki chunks.")
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logger.error("[ERROR] Manual reindex failed: %s", exc, exc_info=True)
+                    _send_reply(activity, f"Reindex failed: {exc}")
             elif user_text:
                 conversation_id = activity.conversation.id
                 session = _sessions.setdefault(conversation_id, AgentSession(session_id=conversation_id))

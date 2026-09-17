@@ -68,15 +68,15 @@ Delivered with a simpler live-query architecture instead of the indexed design a
 | Azure DevOps work items (search + get by id) | Done | WIQL search over title/description, no work item type filter, so Bugs/Tasks/User Stories are all covered |
 | Azure DevOps wiki (search + get page) | Done | Verified end to end with real content |
 | GitHub issues/PRs/code connector | Not implemented | Descoped early ("assume Azure DevOps wiki as only data source") and never revisited |
-| Azure AI Search hybrid index | Not implemented | Live REST calls per question instead of a pre-built index; works at current scale but will not scale to large wikis/backlogs and has no vector/semantic ranking |
-| Scheduled sync connectors | Not implemented | No ingestion pipeline; no staleness, but also no pre-computed embeddings |
+| Azure AI Search hybrid index | Done | ADO-only (GitHub skipped by request); Free tier `search-knowledgeiq-cpvzgdnu`, hybrid vector plus keyword, `text-embedding-3-small` embeddings via the existing Foundry account |
+| Scheduled sync connectors | Done | Timer-triggered reindex every 6 hours, plus an on-demand `reindex now` bot command; re-embeds all content each run rather than syncing deltas |
 | Teams chat channel | Done | Delivered via a classic Bot Framework relay (Azure Function) rather than a native Foundry Activity-protocol hosted agent, which was abandoned after an unresolvable preview SDK bug (`azure-ai-agentserver-activity==1.0.0b1`) |
 | Citations back to source | Done | Replies include work item and wiki URLs |
 | Adaptive Cards | Not implemented | Bot replies are plain text |
 | Least-privilege Entra app for connectors | Partial | Using a PAT (`ADO_PAT`) rather than a scoped OAuth app; this PAT has been exposed in chat multiple times and should be rotated |
 | Evaluation dataset | Partial | Generated for the Foundry Responses-protocol agent (`knowledge-iq-agent`), not re-run against the Teams relay bot |
 
-Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end. See [Current flow](#current-flow) for the diagrams, resource inventory, and known limitations.
+Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`, plus Azure AI Search service `search-knowledgeiq-cpvzgdnu` for indexed Q&A. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end. See [Current flow](#current-flow) for the diagrams, resource inventory, and known limitations.
 
 ## Feature 2: meeting capture and wiki write-back
 
@@ -168,7 +168,7 @@ Not implemented. Two things are verified, the rest is still open:
 
 ## Current flow
 
-What is actually deployed as of 2026-09-17: a single Azure Function doing double duty as the Q&A agent and the meeting-summarization orchestrator. There is no search index, no GitHub connector, and no live-audio meeting bot.
+What is actually deployed as of 2026-09-17: a single Azure Function doing double duty as the Q&A agent and the meeting-summarization orchestrator, now backed by an Azure AI Search index for the Q&A path. There is still no GitHub connector and no live-audio meeting bot.
 
 ```mermaid
 flowchart TB
@@ -180,6 +180,8 @@ flowchart TB
     end
 
     Model[Foundry model gpt-5.4-mini]
+    Embed[Foundry text-embedding-3-small]
+    Search[Azure AI Search knowledge-iq-index]
     ADO[Azure DevOps work items and wiki]
 
     subgraph MeetingAuth[Meeting summarization]
@@ -189,7 +191,10 @@ flowchart TB
 
     User <--> BotService <--> Function
     Function <--> Model
-    Function <--> ADO
+    Function <--> Search
+    Search <--> Embed
+    Function -. reindex every 6h or on demand .-> ADO
+    ADO -- embedded chunks --> Search
     Function --> MSIdentity
     Function <--> Graph
     Graph -- summary written back --> ADO
@@ -210,10 +215,15 @@ sequenceDiagram
     Teams->>BotService: Forward activity
     BotService->>Function: POST messages, with Bot Framework JWT
     Function->>Function: Validate JWT, load or create session
-    Function->>Model: Run agent turn with the four ADO tools available
-    Model->>Function: Tool call, e.g. search_wiki or search_work_items
-    Function->>ADO: Live REST call
-    ADO-->>Function: Work items or wiki page content
+    Function->>Model: Run agent turn with search_knowledge_base and the live ADO tools available
+    Model->>Function: Tool call, e.g. search_knowledge_base
+    Function->>Function: Embed query, hybrid search Azure AI Search index
+    Function-->>Model: Ranked chunks with source links
+    alt Nothing relevant in the index
+        Model->>Function: Fall back to search_wiki or search_work_items
+        Function->>ADO: Live REST call
+        ADO-->>Function: Work items or wiki page content
+    end
     Function->>Model: Tool result
     Model-->>Function: Final answer with citation
     Function->>BotService: Send reply activity
@@ -224,9 +234,10 @@ sequenceDiagram
 * Azure Bot resource `knowledgeiq-relay-bot`, registered as SingleTenant, with the Teams channel enabled, and a sideloaded Teams app package (`knowledgeiq-relay-teams-app.zip`) for personal, team, or group chat scope.
 * Entra ID app registration `MicrosoftAppId=0cbb69cf-b392-4451-b99b-eccabed08da3` used for both inbound activity validation and outbound reply authentication.
 * Function App `func-knowledgeiq-relay-cpvzgdnu` (Linux Consumption plan `EastUS2LinuxDynamicPlan`) is the only compute component. Its `messages` route validates every inbound Bot Framework JWT in code, then replies through `ConnectorClient.conversations.send_to_conversation`. It holds an in-memory session dictionary keyed by Teams conversation id, so multi-turn context lasts only for the life of the function instance.
-* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account, no PAT or key needed for the model call itself.
+* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account and the Search service, no PAT or key needed for either.
 * An in-process `Agent` (Agent Framework) is built directly inside the Function App using `FoundryChatClient` against Foundry account `cog-3y7mapyaibvjm`, project `knowledge-iq-ai`, model deployment `gpt-5.4-mini`. This is not a separately hosted Foundry agent.
-* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
+* `search_indexer.py` embeds and upserts Azure DevOps content into `knowledge-iq-index` (Azure AI Search, Free tier), refreshed every 6 hours by a timer trigger or on demand via the `reindex now` bot command; `search_knowledge_base` is the agent's preferred tool, with the older live ADO search tools kept as a fallback.
+* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live for the fallback tools and for `get_work_item`/`get_wiki_page` detail lookups, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
 
 ### Meeting summarization turn
 
@@ -282,11 +293,14 @@ All resources live in resource group `rg-knowledge-iq-agent-dev-005cbe47` (`east
 | `stkiqrelaycpvzgdnu` | Microsoft.Storage/storageAccounts | Function App storage, also backs the pending-meeting-auth table |
 | `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Insights/components | Application Insights for the function |
 | `knowledgeiq-relay-bot` | Microsoft.BotService/botServices | Bot Service registration with the Teams channel |
+| `search-knowledgeiq-cpvzgdnu` | Microsoft.Search/searchServices | Free tier, hosts `knowledge-iq-index` for hybrid Q&A search |
+| `cog-3y7mapyaibvjm/text-embedding-3-small` | Microsoft.CognitiveServices/accounts/deployments | Embedding model used to vectorize indexed content and queries |
 
 ### Known limitations
 
 * Q&A session state is in-memory only. A function restart or scale event loses conversation context.
-* Live Azure DevOps calls on every question will not scale well against a large backlog or wiki, since there is no caching or indexing layer.
+* The search index is reindexed in full every 6 hours (or on demand), rather than syncing only changed items; fine at current content volume, wasteful and slower as the wiki or backlog grows.
+* The Search service is on the Free tier: 50 MB storage, 3 indexes maximum, no SLA. Adequate for validating the design, not for production load.
 * The Azure DevOps PAT is a single shared credential with read access to the whole project, rather than a scoped app registration. It has been exposed in chat multiple times and should be rotated.
 * No evaluation suite has been run against the relay bot directly. The evaluation suite generated earlier in the project targeted the standalone Foundry agent, which has since been deleted.
 * Meeting summarization only works for meetings the signed-in user personally organized, and can be blocked entirely by a tenant's Conditional Access policy.
