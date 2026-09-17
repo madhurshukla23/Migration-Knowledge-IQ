@@ -19,6 +19,12 @@ The plan below is organized into three phases that map to the three requested fe
 * Goal: during a meeting, detect the topic under discussion and surface relevant wiki knowledge automatically or on request.
 * Non-goal (initial phases): editing or closing work items on behalf of users, voice output/TTS responses in meetings, support for meeting platforms other than Teams.
 
+## Architecture style
+
+The deployed system is a **modular monolith**: one Azure Function App (`func-knowledgeiq-relay-cpvzgdnu`) is the single unit of deployment and scaling for the Q&A agent, meeting summarization, and search indexing, but the code is split by responsibility into separate modules (`ado_client.py`, `search_indexer.py`, `meeting_auth_store.py`, `graph_meeting_client.py`) rather than one script. See [Current flow](#current-flow) for the deployed component diagram.
+
+The bot itself exposes one inbound API surface: a single Bot Framework `messages` webhook that Teams posts every activity to, dispatched internally by content (plain question, `reindex now`, `summarize meeting`, `done`). Outbound, it is a consumer of several external REST APIs — Azure DevOps (work items, wiki), Microsoft Graph (meetings, transcripts), Azure AI Search, and the Foundry model/embedding endpoints — plus one time-based trigger (the 6-hour reindex timer) rather than a purely request-driven design.
+
 ## Recommended stack
 
 | Concern | Recommendation | Why |
