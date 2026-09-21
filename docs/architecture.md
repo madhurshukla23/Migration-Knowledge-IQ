@@ -1,389 +1,391 @@
 ---
 title: Knowledge IQ Bot Architecture
-description: Architecture and phased delivery plan for a Teams bot that answers questions from Azure DevOps, GitHub, and wiki content, records meetings, and offers live suggestions
+description: Presentation-ready current and target architecture for the Knowledge IQ Microsoft Teams bot
 author: Migration-Knowledge-IQ team
-ms.date: 2026-09-15
-ms.topic: concept
+ms.date: 2026-09-21
+ms.topic: architecture
 ---
 
-## Overview
+## Executive overview
 
-Knowledge IQ is a Microsoft Teams bot that connects an organization's Azure DevOps work items, GitHub repositories, and Azure DevOps wiki into a single conversational assistant. The bot answers questions in chat, joins meetings to capture discussion and write summaries back to the wiki, and offers live suggestions during meetings by grounding the conversation in existing wiki knowledge.
+Knowledge IQ is a Microsoft Teams assistant that turns Azure DevOps content into
+accessible, cited answers and converts completed Teams meeting transcripts into
+structured wiki notes.
 
-The plan below is organized into three phases that map to the three requested features. Phase 1 is the recommended starting point because it delivers standalone value and produces the retrieval and indexing components that Phases 2 and 3 depend on.
+The current solution is a modular Python application deployed as one Azure Function
+App. It integrates Teams, Azure Bot Service, Microsoft Foundry, Azure AI Search,
+Azure DevOps, Microsoft Graph, and Azure Storage. This design keeps the pilot small
+while separating the code by responsibility so individual workloads can move to
+dedicated services as demand grows.
 
-## Goals and non-goals
+### Business value
 
-* Goal: answer natural-language questions using Azure DevOps work items, GitHub issues/PRs/code, and Azure DevOps wiki pages as grounding sources.
-* Goal: join a Teams meeting on invitation, capture a transcript, and publish structured notes back to the wiki.
-* Goal: during a meeting, detect the topic under discussion and surface relevant wiki knowledge automatically or on request.
-* Non-goal (initial phases): editing or closing work items on behalf of users, voice output/TTS responses in meetings, support for meeting platforms other than Teams.
+* Reduces time spent searching across work items and wiki pages
+* Answers in Teams with links to the supporting source material
+* Converts meeting transcripts into reusable decisions and action items
+* Establishes a shared retrieval layer for future GitHub content and live meeting
+  assistance
 
-## Architecture style
+### Delivery snapshot
 
-The deployed system is a **modular monolith**: one Azure Function App (`func-knowledgeiq-relay-cpvzgdnu`) is the single unit of deployment and scaling for the Q&A agent, meeting summarization, and search indexing, but the code is split by responsibility into separate modules (`ado_client.py`, `search_indexer.py`, `meeting_auth_store.py`, `graph_meeting_client.py`) rather than one script. See [Current flow](#current-flow) for the deployed component diagram.
+| Capability | Status | Current experience |
+|------------|--------|--------------------|
+| Azure DevOps Q&A | Delivered | Hybrid search across work items and wiki pages, with live API fallback |
+| Source citations | Delivered | Adaptive Card responses link to source work items and wiki pages |
+| Knowledge refresh | Delivered | Full refresh every six hours and on-demand refresh with `reindex now` |
+| Meeting summary | Pilot | User-authorized transcript retrieval, AI summary, and wiki write-back |
+| GitHub knowledge | Planned | Issues, pull requests, and code are not indexed today |
+| Live meeting suggestions | Planned | Requires a real-time Teams media bot and proactive meeting messages |
 
-The bot itself exposes one inbound API surface: a single Bot Framework `messages` webhook that Teams posts every activity to, dispatched internally by content (plain question, `reindex now`, `summarize meeting`, `done`). Outbound, it is a consumer of several external REST APIs — Azure DevOps (work items, wiki), Microsoft Graph (meetings, transcripts), Azure AI Search, and the Foundry model/embedding endpoints — plus one time-based trigger (the 6-hour reindex timer) rather than a purely request-driven design.
+## Architecture principles
 
-## Recommended stack
+* Ground every answer in approved enterprise content and return source links.
+* Use managed identity for Azure service-to-service access where supported.
+* Keep source adapters, retrieval, orchestration, and channel handling modular.
+* Start with post-meeting processing before introducing real-time media complexity.
+* Prefer a small operational footprint during validation, then separate workloads
+  when scale, latency, or reliability requires it.
 
-| Concern | Recommendation | Why |
-|---|---|---|
-| Agent orchestration | Microsoft Foundry hosted agent | Managed agent runtime with tool calling, evaluation, and CI/CD support already covered by the `microsoft-foundry` skill in this environment |
-| Grounding model | Azure OpenAI model deployed through Foundry | Native integration with Foundry agents and tracing |
-| Knowledge store | Azure AI Search (hybrid vector and keyword) | Purpose-built for RAG, supports incremental indexers |
-| Data connectors | Azure DevOps REST API, GitHub REST/GraphQL API, Azure DevOps Wiki REST API | Official APIs, support incremental sync via timestamps/ETags |
-| Chat channel | Azure Bot Service with Teams channel (Bot Framework SDK) | Standard way to expose a conversational bot inside Teams |
-| Meeting join and audio | Microsoft Graph Communications API (calling and media bot) | Only supported path for a bot to join a Teams meeting and access real-time audio |
-| Speech to text | Azure AI Speech, real-time transcription with speaker diarization | Needed to turn meeting audio into attributable transcript text |
-| Secrets and identity | Microsoft Entra ID app registrations, Azure Key Vault, managed identity | Avoids storing PATs or client secrets in code |
-| Hosting | Azure Container Apps for the bot and media processing services | Scales independently, supports the long-running media bot process separately from the chat bot |
+## Current architecture
 
-## Feature 1: knowledge Q&A (MVP)
-
-### Scope
-
-Users chat with the bot in Teams (or a test console) and ask questions about work items, code, issues, or documented decisions. The bot retrieves relevant passages and answers with citations back to the source item.
-
-### Components
-
-* Connectors that pull data on a schedule or via webhooks:
-  * Azure DevOps work items through the WIQL and work item REST APIs, including title, description, comments, state, and links.
-  * GitHub issues, pull requests, and README/code comments through the REST or GraphQL API.
-  * Azure DevOps wiki pages through the Wiki REST API, including page path and content.
-* A chunking and embedding pipeline that normalizes each source type into a common document schema (id, source, title, url, text, last-updated) before indexing.
-* An Azure AI Search index configured for hybrid search (vector plus keyword) with metadata filters for source type, project, and date.
-* A Foundry hosted agent with a retrieval tool bound to the search index, plus source-specific tools (get work item by id, get PR by number) for direct lookups that do not require semantic search.
-* A Bot Framework bot registered in Azure Bot Service and published to Teams, forwarding user messages to the agent and rendering citations as Adaptive Cards.
-
-### Build steps
-
-1. Register a Microsoft Entra ID app for the connectors with least-privilege scopes (`vso.work_read`, `vso.wiki_read` for Azure DevOps; `repo`/`read:org` scoped GitHub App or PAT stored in Key Vault).
-2. Stand up an Azure AI Search service and define the document schema and vector field.
-3. Implement the three connectors as scheduled jobs (Azure Functions timer trigger is a good fit) that pull deltas and push documents to the search index.
-4. Create the Foundry hosted agent with a retrieval tool and per-source lookup tools, following the `microsoft-foundry` skill's `create` and `deploy` workflows.
-5. Register an Azure Bot Service resource, add the Teams channel, and connect it to the agent.
-6. Add evaluation datasets (sample questions with expected sources) and run the Foundry evaluation workflow before wider rollout.
-
-### Implementation status (as of 2026-09-16)
-
-Delivered with a simpler live-query architecture instead of the indexed design above. Revisit this section before starting Feature 2 or any further Feature 1 work.
-
-| Component | Status | Notes |
-|---|---|---|
-| Azure DevOps work items (search + get by id) | Done | WIQL search over title/description, no work item type filter, so Bugs/Tasks/User Stories are all covered |
-| Azure DevOps wiki (search + get page) | Done | Verified end to end with real content |
-| GitHub issues/PRs/code connector | Not implemented | Descoped early ("assume Azure DevOps wiki as only data source") and never revisited |
-| Azure AI Search hybrid index | Done | ADO-only (GitHub skipped by request); Free tier `search-knowledgeiq-cpvzgdnu`, hybrid vector plus keyword, `text-embedding-3-small` embeddings via the existing Foundry account |
-| Scheduled sync connectors | Done | Timer-triggered reindex every 6 hours, plus an on-demand `reindex now` bot command; re-embeds all content each run rather than syncing deltas |
-| Teams chat channel | Done | Delivered via a classic Bot Framework relay (Azure Function) rather than a native Foundry Activity-protocol hosted agent, which was abandoned after an unresolvable preview SDK bug (`azure-ai-agentserver-activity==1.0.0b1`) |
-| Citations back to source | Done | Replies include work item and wiki URLs |
-| Adaptive Cards | Not implemented | Bot replies are plain text |
-| Least-privilege Entra app for connectors | Partial | Using a PAT (`ADO_PAT`) rather than a scoped OAuth app; this PAT has been exposed in chat multiple times and should be rotated |
-| Evaluation dataset | Partial | Generated for the Foundry Responses-protocol agent (`knowledge-iq-agent`), not re-run against the Teams relay bot |
-
-Deployed assets: Teams relay bot `knowledgeiq-relay-bot` backed by Azure Function `func-knowledgeiq-relay-cpvzgdnu`, plus Azure AI Search service `search-knowledgeiq-cpvzgdnu` for indexed Q&A. The original standalone Foundry hosted agent (`knowledge-iq-agent`) was deleted as redundant once the relay bot proved to cover the same Q&A capability end to end. See [Current flow](#current-flow) for the diagrams, resource inventory, and known limitations.
-
-## Feature 2: meeting capture and wiki write-back
-
-### Scope
-
-Users invite the bot to a Teams meeting. The bot joins as a media-enabled participant, transcribes the discussion, and writes a structured summary back to a wiki page after the meeting.
-
-### Components
-
-* A Graph Communications API calling bot that accepts the meeting invite and joins as a bot participant with audio access.
-* Azure AI Speech real-time transcription with diarization, streaming meeting audio to text with speaker labels.
-* A post-meeting summarization step where the Foundry agent turns the raw transcript into structured notes: attendees, decisions, action items, open questions.
-* A wiki write-back tool that calls the Azure DevOps Wiki REST API to create or update a page under a configured path (for example `/Meetings/{date}-{title}`).
-
-### Build steps
-
-1. Register a bot with Microsoft Graph calling permissions (`Calls.AccessMedia.All`, `Calls.JoinGroupCall.All`) and complete the Teams meeting bot onboarding, which requires a media processing endpoint separate from the chat bot.
-2. Implement the media bot on Azure Container Apps or a service with predictable low-latency networking, since real-time audio processing is sensitive to cold starts.
-3. Wire the media bot's audio stream into Azure AI Speech for real-time transcription with diarization.
-4. Extend the Foundry agent with a summarization prompt and a wiki write-back tool, reusing the read connector from Feature 1 for the write path.
-5. Add consent and recording-notice handling, since meeting recording triggers organizational compliance and, in many regions, legal notice requirements.
-
-### Implementation status (as of 2026-09-16)
-
-Delivered with a lighter, delegated-auth pivot instead of the live audio-capture design above, since it needs no Teams Administrator role and no new hosting.
-
-| Component | Status | Notes |
-|---|---|---|
-| Delegated sign-in (device code flow) | Done | Uses Microsoft's public "Microsoft Graph Command Line Tools" client, no app registration or Teams Administrator role required |
-| Resolve meeting by join URL | Done | `GET /me/onlineMeetings?$filter=JoinWebUrl eq ...` |
-| Fetch and parse transcript | Done | WebVTT converted to speaker-attributed plain text; only covers meetings the signed-in user organized |
-| Summarize into structured notes | Done | Attendees, Decisions, Action Items, Open Questions, via the same Foundry model |
-| Write summary back to wiki | Done | New `ado_client.create_wiki_page`, path convention `/Meetings/{date}-{subject}` |
-| Teams bot commands (`summarize meeting`, `done`) | Done | Added to the existing relay bot, smoke-tested via Direct Line |
-| End-to-end test against a real Teams meeting | Pending | Needs a real meeting with transcription enabled to fully validate |
-| Live Graph Communications calling bot, real-time audio | Not implemented | The heavier design above; would need a .NET service, since the Graph Calling SDK has no Python support |
-| Org-wide use (reading other users' meetings) | Not implemented | Requires a Teams Administrator to create an application access policy; only the signed-in user's own meetings work today |
-
-### Architecture diagram (as implemented)
-
-This is the delegated, post-meeting pivot that is actually deployed today, not the live-audio calling bot described in Components/Build steps above.
+The deployed system uses one Function App as the orchestration and compute boundary.
+Q&A and meeting summarization share the same Foundry model integration but follow
+separate processing paths.
 
 ```mermaid
 flowchart LR
-    U[Teams user]
+    User([Teams user])
 
-    subgraph Bot[func-knowledgeiq-relay-cpvzgdnu]
-        H[Meeting command handler]
-        AuthStore[(PendingMeetingAuth table\nAzure Table Storage)]
-        Summarizer[Foundry summarizer\ngpt-5.4-mini]
+    subgraph Channel[Microsoft Teams channel]
+        Teams[Microsoft Teams]
+        Bot[Azure Bot Service]
     end
 
-    MS[Microsoft identity platform\ndevice code flow]
-    Graph[Microsoft Graph\nonlineMeetings + transcripts]
-    Wiki[(Azure DevOps Wiki)]
-
-    U -- "1. summarize meeting url" --> H
-    H -- "2. save device code + join url" --> AuthStore
-    H -- "3. request device code" --> MS
-    MS -- "4. code + verification url" --> H
-    H -- "5. reply with sign-in code" --> U
-    U -- "6. sign in in browser" --> MS
-    U -- "7. done" --> H
-    H -- "8. load pending state" --> AuthStore
-    H -- "9. redeem device code" --> MS
-    MS -- "10. delegated access token" --> H
-    H -- "11. resolve meeting, get transcript" --> Graph
-    Graph -- "12. WebVTT transcript" --> H
-    H -- "13. transcript text" --> Summarizer
-    Summarizer -- "14. structured notes" --> H
-    H -- "15. create /Meetings/date-subject page" --> Wiki
-    H -- "16. reply with wiki link" --> U
-```
-
-Real-time audio capture (the bot joining as a live participant) is not represented here because it is not implemented — see the "Not implemented" rows above.
-
-See [Current flow](#current-flow) for the turn-by-turn sequence diagram and component detail.
-
-## Feature 3: live meeting suggestions
-
-### Scope
-
-While the bot is in the meeting, it continuously compares the live transcript against the Feature 1 knowledge index. When it detects a topic with strong matches, it either responds automatically in the meeting chat or posts a suggestion card, depending on configuration.
-
-### Components
-
-* A streaming topic-detection step that runs over rolling transcript windows (for example the last 30 to 60 seconds) rather than the full transcript, to keep suggestions timely.
-* A relevance gate that only triggers a suggestion when search results exceed a confidence threshold, to avoid noisy or irrelevant interruptions.
-* A meeting chat responder that posts suggestions as Adaptive Cards in the meeting chat through the Bot Framework conversation tied to that meeting.
-* A configuration setting per meeting or per team for auto-respond versus suggest-only mode.
-
-### Build steps
-
-1. Reuse the Feature 2 transcript stream and add a sliding-window buffer with topic segmentation.
-2. Reuse the Feature 1 retrieval tool for topic queries, tuning the relevance threshold with recorded meeting samples before enabling auto-respond.
-3. Implement suggestion delivery as proactive messages into the meeting's chat thread through the Bot Framework conversation reference captured at join time.
-4. Start in suggest-only mode for all meetings and require explicit opt-in per team before enabling auto-respond, since incorrect automatic responses are more disruptive than a delayed suggestion.
-
-### Implementation status (as of 2026-09-16)
-
-Not implemented. Two things are verified, the rest is still open:
-
-* Admin consent for `Calls.AccessMedia.All` and `Calls.JoinGroupCall.All` was granted on the relay bot's app registration without issue, confirming this does not require a Teams Administrator role.
-* Whether real-time media access actually works at call time, separate from consent, is unverified. It can only be confirmed by building the .NET Graph Calling SDK client and attempting a live join.
-* A lighter, no-new-permissions alternative is possible today: invite the existing relay bot into a meeting's chat and let users `@mention` it with questions, the same Q&A flow as Feature 1. This only supports on-request answers, not automatic topic detection from live audio.
-
-## Cross-cutting concerns
-
-* Authentication and authorization: use Microsoft Entra ID for user identity in Teams, and separate managed identities or app registrations per connector so each integration holds only the scopes it needs.
-* Secrets: store Azure DevOps PATs, GitHub credentials, and any API keys in Azure Key Vault, referenced by managed identity, never checked into source control.
-* Data governance: meeting transcripts and wiki write-backs may contain sensitive discussion. Apply retention policies and restrict the wiki write path to a dedicated meetings section with appropriate permissions.
-* Observability: use the Foundry agent's built-in tracing and evaluation tooling to monitor answer quality, and Azure Monitor/Application Insights for the bot and connector services.
-* Incremental indexing: design connectors to sync deltas (using `System.ChangedDate` in Azure DevOps and `updated_at` in GitHub) rather than re-indexing all content on every run.
-
-## Suggested delivery order
-
-1. Feature 1: connectors, search index, Foundry agent, Teams chat bot. This is the requested MVP and the foundation for the other two features.
-2. Feature 2: meeting join, transcription, and wiki write-back, reusing the agent and wiki tool from Feature 1.
-3. Feature 3: live suggestions, reusing the transcript pipeline from Feature 2 and the retrieval tool from Feature 1.
-
-## Open questions to confirm before implementation
-
-* Which Azure DevOps organization(s) and GitHub repositories are in scope for the initial index.
-* Expected data volume (work item count, repository count, wiki page count) to size the Azure AI Search tier.
-* Who can invite the bot to meetings and which meetings are in scope, for consent and compliance planning.
-* Target wiki location and page naming convention for meeting notes.
-
-## Current flow
-
-What is actually deployed as of 2026-09-17: a single Azure Function doing double duty as the Q&A agent and the meeting-summarization orchestrator, now backed by an Azure AI Search index for the Q&A path. There is still no GitHub connector and no live-audio meeting bot.
-
-```mermaid
-flowchart TB
-    User[Teams user]
-
-    subgraph BotLayer[Bot layer]
-        BotService[Azure Bot Service]
-        Function[func-knowledgeiq-relay-cpvzgdnu]
+    subgraph Runtime[Knowledge IQ runtime]
+        Function[Azure Function App]
+        Session[(In-memory Q&A sessions)]
+        Pending[(Pending auth state)]
     end
 
-    Model[Foundry model gpt-5.4-mini]
-    Embed[Foundry text-embedding-3-small]
-    Search[Azure AI Search knowledge-iq-index]
-    ADO[Azure DevOps work items and wiki]
-
-    subgraph MeetingAuth[Meeting summarization]
-        MSIdentity[Microsoft identity platform device code]
-        Graph[Microsoft Graph online meetings and transcripts]
+    subgraph Intelligence[AI and retrieval]
+        Agent[Foundry chat model]
+        Search[Azure AI Search]
+        Embedding[Embedding model]
     end
 
-    User <--> BotService <--> Function
-    Function <--> Model
+    subgraph Enterprise[Enterprise systems]
+        ADO[(Azure DevOps<br/>work items and wiki)]
+        Graph[Microsoft Graph<br/>meeting transcripts]
+        Identity[Microsoft identity platform]
+    end
+
+    User <--> Teams <--> Bot <--> Function
+    Function <--> Agent
     Function <--> Search
-    Search <--> Embed
-    Function -. reindex every 6h or on demand .-> ADO
-    ADO -- embedded chunks --> Search
-    Function --> MSIdentity
+    Search <--> Embedding
+    Function <--> ADO
+    Function --> Identity
     Function <--> Graph
-    Graph -- summary written back --> ADO
+    Function <--> Session
+    Function <--> Pending
+
+    classDef user fill:#E8F3FF,stroke:#0067B8,color:#111827
+    classDef channel fill:#DDEBFF,stroke:#2563EB,color:#111827
+    classDef runtime fill:#FFF4CE,stroke:#C19C00,color:#111827
+    classDef ai fill:#F3E8FF,stroke:#7E22CE,color:#111827
+    classDef data fill:#DCFCE7,stroke:#15803D,color:#111827
+    classDef identity fill:#FCE7F3,stroke:#BE185D,color:#111827
+
+    class User user
+    class Teams,Bot channel
+    class Function,Session runtime
+    class Agent,Search,Embedding ai
+    class ADO,Graph,Pending data
+    class Identity identity
 ```
 
-### Chat Q&A turn
+### Diagram color key
+
+| Color | Meaning |
+|-------|---------|
+| Blue | User and Teams channel |
+| Amber | Application runtime and transient processing state |
+| Purple | AI models and retrieval services |
+| Green | Enterprise data and durable application state |
+| Pink | Identity and delegated authorization |
+
+## Q&A processing flow
+
+The indexed knowledge base is the preferred retrieval path. Direct Azure DevOps API
+calls provide a fallback when indexed results are insufficient and provide detailed
+lookups for a known work item ID or wiki path.
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Teams
-    participant BotService as Azure Bot Service
-    participant Function as func-knowledgeiq-relay-cpvzgdnu
-    participant Model as Foundry model gpt-5.4-mini
-    participant ADO as Azure DevOps REST API
+    autonumber
+    actor User as Teams user
+    participant Bot as Azure Bot Service
+    participant App as Function App
+    participant Model as Foundry model
+    participant Search as Azure AI Search
+    participant ADO as Azure DevOps
 
-    User->>Teams: Ask a question
-    Teams->>BotService: Forward activity
-    BotService->>Function: POST messages, with Bot Framework JWT
-    Function->>Function: Validate JWT, load or create session
-    Function->>Model: Run agent turn with search_knowledge_base and the live ADO tools available
-    Model->>Function: Tool call, e.g. search_knowledge_base
-    Function->>Function: Embed query, hybrid search Azure AI Search index
-    Function-->>Model: Ranked chunks with source links
-    alt Nothing relevant in the index
-        Model->>Function: Fall back to search_wiki or search_work_items
-        Function->>ADO: Live REST call
-        ADO-->>Function: Work items or wiki page content
+    User->>Bot: Ask a project question
+    Bot->>App: Send authenticated activity
+    App->>App: Validate Bot Framework token
+    App->>Model: Send question and tool definitions
+    Model->>App: Request knowledge-base search
+    App->>Search: Run hybrid keyword and vector query
+    Search-->>App: Return ranked chunks and source links
+    opt Indexed evidence is insufficient
+        App->>ADO: Search or retrieve source content live
+        ADO-->>App: Return source details
     end
-    Function->>Model: Tool result
-    Model-->>Function: Final answer with citation
-    Function->>BotService: Send reply activity
-    BotService->>Teams: Deliver reply
-    Teams->>User: Show answer
+    App->>Model: Supply grounded evidence
+    Model-->>App: Generate concise answer with citations
+    App-->>Bot: Send Adaptive Card
+    Bot-->>User: Display answer and source buttons
 ```
 
-* Azure Bot resource `knowledgeiq-relay-bot`, registered as SingleTenant, with the Teams channel enabled, and a sideloaded Teams app package (`knowledgeiq-relay-teams-app.zip`) for personal, team, or group chat scope.
-* Entra ID app registration `MicrosoftAppId=0cbb69cf-b392-4451-b99b-eccabed08da3` used for both inbound activity validation and outbound reply authentication.
-* Function App `func-knowledgeiq-relay-cpvzgdnu` (Linux Consumption plan `EastUS2LinuxDynamicPlan`) is the only compute component. Its `messages` route validates every inbound Bot Framework JWT in code, then replies through `ConnectorClient.conversations.send_to_conversation`. It holds an in-memory session dictionary keyed by Teams conversation id, so multi-turn context lasts only for the life of the function instance.
-* A system-assigned managed identity (`0b48ae88-06f7-4bcf-ac32-f3ea83336f26`) grants the Function access to the Foundry account and the Search service, no PAT or key needed for either.
-* An in-process `Agent` (Agent Framework) is built directly inside the Function App using `FoundryChatClient` against Foundry account `cog-3y7mapyaibvjm`, project `knowledge-iq-ai`, model deployment `gpt-5.4-mini`. This is not a separately hosted Foundry agent.
-* `search_indexer.py` embeds and upserts Azure DevOps content into `knowledge-iq-index` (Azure AI Search, Free tier), refreshed every 6 hours by a timer trigger or on demand via the `reindex now` bot command; `search_knowledge_base` is the agent's preferred tool, with the older live ADO search tools kept as a fallback.
-* `ado_client.py` inside the Function App calls Azure DevOps REST APIs directly and live for the fallback tools and for `get_work_item`/`get_wiki_page` detail lookups, authenticating with a personal access token (`ADO_PAT` app setting) rather than a scoped Entra app.
+### Retrieval and indexing
 
-### Meeting summarization turn
+1. A timer trigger runs every six hours, or a user invokes `reindex now`.
+2. The indexer reads all Azure DevOps work items and wiki pages.
+3. Content is split into chunks of approximately 3,000 characters.
+4. `text-embedding-3-small` generates a vector for each chunk.
+5. Chunks are merged into `knowledge-iq-index`; stale chunks are removed.
+6. At query time, keyword and vector results are ranked together.
+
+This is a full-source refresh, not a delta sync. It is appropriate for the current
+pilot volume but will become slower and more expensive as content grows.
+
+## Meeting summary flow
+
+Meeting summarization is asynchronous and post-meeting. The bot does not join the
+call or process live audio. The meeting organizer authorizes transcript access by
+using the device code flow.
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Teams
-    participant BotService as Azure Bot Service
-    participant Function as func-knowledgeiq-relay-cpvzgdnu
-    participant MSIdentity as Microsoft identity platform
+    autonumber
+    actor User as Meeting organizer
+    participant Bot as Knowledge IQ
+    participant State as Azure Table Storage
+    participant Identity as Microsoft identity platform
     participant Graph as Microsoft Graph
-    participant Model as Foundry model gpt-5.4-mini
+    participant Model as Foundry model
     participant Wiki as Azure DevOps Wiki
 
-    User->>Teams: summarize meeting <join url>
-    Teams->>BotService: Forward activity
-    BotService->>Function: POST messages
-    Function->>MSIdentity: Request device code
-    MSIdentity-->>Function: User code and verification URL
-    Function->>Teams: Reply with sign-in code
-    User->>MSIdentity: Sign in and enter code in a browser
-    User->>Teams: done
-    Teams->>Function: POST messages
-    Function->>MSIdentity: Redeem device code
-    MSIdentity-->>Function: Delegated access token
-    Function->>Graph: Resolve meeting by join URL
-    Function->>Graph: Get transcript content
-    Graph-->>Function: WebVTT transcript
-    Function->>Model: Summarize transcript
-    Model-->>Function: Structured notes
-    Function->>Wiki: Create /Meetings/{date}-{subject} page
-    Function->>BotService: Reply with wiki link
-    BotService->>Teams: Deliver reply
-    Teams->>User: Show summary link
+    User->>Bot: summarize meeting <join URL>
+    Bot->>Identity: Request device code
+    Bot->>State: Save device code and join URL
+    Bot-->>User: Return sign-in instructions
+    User->>Identity: Complete delegated sign-in
+    User->>Bot: done
+    Bot->>State: Load pending request
+    Bot->>Identity: Redeem device code
+    Identity-->>Bot: Return delegated access token
+    Bot->>Graph: Resolve meeting and fetch transcript
+    Graph-->>Bot: Return WebVTT transcript
+    Bot->>Model: Generate structured meeting notes
+    Model-->>Bot: Return attendees, decisions, actions, questions
+    Bot->>Wiki: Create dated meeting page
+    Bot-->>User: Return wiki link
 ```
 
-* `graph_meeting_client.py` implements the device code request/redeem and the Graph calls, using Microsoft's public "Microsoft Graph Command Line Tools" client. No app registration change or Teams Administrator role is required.
-* Pending sign-in state (`device_code`, `join_url`) is stored per conversation in an Azure Table Storage table (`PendingMeetingAuth`), reusing the Function App's existing storage account (`AzureWebJobsStorage`), not in memory, so it survives across the two separate requests the flow needs.
-* `ado_client.create_wiki_page` writes the summary, reusing the same PAT-authenticated client as the Q&A read path. The meeting subject is slugified before use in the page path to avoid characters ADO wiki paths reject.
-* Only meetings the signed-in user personally organized can be read, since this uses the delegated `/me/onlineMeetings` scope. Reading other users' meetings would need an application-permission flow gated behind a Teams Administrator-only application access policy.
-* In one production tenant tested, this sign-in was rejected by a Conditional Access policy restricting the authentication flow; it succeeded cleanly in a separate Microsoft 365 developer/test tenant, confirming the block is tenant policy, not an issue with this implementation.
+The flow currently works only when the signed-in user organized the meeting,
+transcription was enabled, and tenant Conditional Access policy permits the device
+code flow. End-to-end validation with a production meeting remains a pilot exit
+criterion.
 
-### Deployed resource inventory
+## Component responsibilities
 
-All resources live in resource group `rg-knowledge-iq-agent-dev-005cbe47` (`eastus2`), subscription `f3d6b6b0-1c3e-4194-aced-57f1f90bb945`.
+| Component | Responsibility | Authentication |
+|-----------|----------------|----------------|
+| Microsoft Teams | User interaction in personal, team, and group chat | Teams identity |
+| Azure Bot Service | Teams channel registration and Bot Framework message relay | Single-tenant bot registration |
+| Azure Function App | Request validation, command routing, agent tools, indexing, and summarization | Managed identity and app credentials |
+| Microsoft Foundry | Chat completion and transcript summarization | Function managed identity |
+| Azure AI Search | Hybrid retrieval over indexed Azure DevOps content | Function managed identity |
+| Azure DevOps | Work item and wiki read access; meeting-note write-back | Shared project PAT |
+| Microsoft Graph | Organizer meeting lookup and transcript retrieval | Delegated user token |
+| Azure Table Storage | Pending meeting authorization state | Function storage connection |
 
-| Resource | Type | Role |
-|---|---|---|
-| `cog-3y7mapyaibvjm` | Microsoft.CognitiveServices/accounts | Foundry account hosting the model deployment |
-| `cog-3y7mapyaibvjm/knowledge-iq-ai` | Microsoft.CognitiveServices/accounts/projects | Foundry project used by the relay bot |
-| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Web/sites | The relay bot's compute |
-| `EastUS2LinuxDynamicPlan` | Microsoft.Web/serverFarms | Consumption hosting plan for the function |
-| `stkiqrelaycpvzgdnu` | Microsoft.Storage/storageAccounts | Function App storage, also backs the pending-meeting-auth table |
-| `func-knowledgeiq-relay-cpvzgdnu` | Microsoft.Insights/components | Application Insights for the function |
-| `knowledgeiq-relay-bot` | Microsoft.BotService/botServices | Bot Service registration with the Teams channel |
-| `search-knowledgeiq-cpvzgdnu` | Microsoft.Search/searchServices | Free tier, hosts `knowledge-iq-index` for hybrid Q&A search |
-| `cog-3y7mapyaibvjm/text-embedding-3-small` | Microsoft.CognitiveServices/accounts/deployments | Embedding model used to vectorize indexed content and queries |
+## Security and data boundaries
 
-### Known limitations
+```mermaid
+flowchart LR
+    subgraph UserBoundary[User identity boundary]
+        User([Teams user])
+        Delegated[Delegated Graph token]
+    end
 
-* Q&A session state is in-memory only. A function restart or scale event loses conversation context.
-* The search index is reindexed in full every 6 hours (or on demand), rather than syncing only changed items; fine at current content volume, wasteful and slower as the wiki or backlog grows.
-* The Search service is on the Free tier: 50 MB storage, 3 indexes maximum, no SLA. Adequate for validating the design, not for production load.
-* The Azure DevOps PAT is a single shared credential with read access to the whole project, rather than a scoped app registration. It has been exposed in chat multiple times and should be rotated.
-* No evaluation suite has been run against the relay bot directly. The evaluation suite generated earlier in the project targeted the standalone Foundry agent, which has since been deleted.
-* Meeting summarization only works for meetings the signed-in user personally organized, and can be blocked entirely by a tenant's Conditional Access policy.
+    subgraph AppBoundary[Application trust boundary]
+        BotAuth[Bot Framework JWT validation]
+        App[Function App]
+        ManagedIdentity[System-assigned managed identity]
+        Secret[Azure DevOps PAT]
+    end
 
-## Final flow (end result)
+    subgraph DataBoundary[Enterprise data boundary]
+        Search[(Search index)]
+        Storage[(Pending auth table)]
+        ADO[(Azure DevOps)]
+        Graph[(Microsoft Graph)]
+    end
 
-The required architecture once Feature 1, Feature 2, and Feature 3 are all fully implemented. This combines the original Feature 1 design (search index, GitHub connector) with Feature 2's live-audio meeting bot and Feature 3's live-suggestion loop into one target picture. This is what the phased build-out above works toward, not what is running today.
+    User --> BotAuth --> App
+    User --> Delegated --> App
+    App --> ManagedIdentity --> Search
+    App --> Secret --> ADO
+    App --> Storage
+    App --> Delegated --> Graph
+
+    classDef user fill:#E8F3FF,stroke:#0067B8,color:#111827
+    classDef app fill:#FFF4CE,stroke:#C19C00,color:#111827
+    classDef data fill:#DCFCE7,stroke:#15803D,color:#111827
+    classDef credential fill:#FEE2E2,stroke:#B91C1C,color:#111827
+
+    class User user
+    class BotAuth,App app
+    class Search,Storage,ADO,Graph data
+    class Delegated,ManagedIdentity,Secret credential
+```
+
+### Security posture
+
+* Inbound Bot Framework activities are validated before processing.
+* Managed identity avoids keys for Foundry and Azure AI Search.
+* Model calls disable provider-side conversation storage.
+* Meeting access is delegated to the organizer and limited to transcript read scope.
+* Pending device codes are stored in Azure Table Storage and deleted after token
+  redemption or terminal failure.
+* The Azure DevOps PAT is the main credential risk. It is shared by read and write
+  paths and must be rotated because it has previously been exposed.
+* Meeting transcripts and summaries can contain sensitive information. Retention,
+  access control, and consent requirements must be agreed before production rollout.
+
+## Deployment view
+
+All current resources are deployed in `eastus2` within resource group
+`rg-knowledge-iq-agent-dev-005cbe47`.
+
+| Azure resource | Purpose | Current tier or mode |
+|----------------|---------|----------------------|
+| `knowledgeiq-relay-bot` | Teams channel and bot registration | Single tenant |
+| `func-knowledgeiq-relay-cpvzgdnu` | Bot, agent tools, indexer, and meeting workflow | Linux Consumption |
+| `EastUS2LinuxDynamicPlan` | Function hosting plan | Consumption |
+| `stkiqrelaycpvzgdnu` | Function runtime storage and pending auth table | Storage account |
+| `search-knowledgeiq-cpvzgdnu` | Hybrid knowledge index | Free tier |
+| `cog-3y7mapyaibvjm` | Foundry account and model deployments | `gpt-5.4-mini`, `text-embedding-3-small` |
+| Application Insights | Function telemetry | Runtime monitoring |
+
+## Constraints and production risks
+
+| Priority | Constraint or risk | Impact | Recommended action |
+|----------|--------------------|--------|--------------------|
+| High | Azure DevOps uses a shared PAT | Broad credential exposure affects read and write operations | Rotate immediately, store in Key Vault, then replace with scoped OAuth or workload identity |
+| High | Q&A sessions are held in Function memory | Context is lost on restart or scale-out | Move session state to Cosmos DB or another durable distributed store |
+| High | Meeting workflow is not validated end to end in production | Pilot capability may fail under real tenant policies or transcript conditions | Run a scripted organizer meeting test and capture operational evidence |
+| Medium | Search runs on the Free tier | No SLA and limited capacity | Establish volume and availability targets, then select a production tier |
+| Medium | Every refresh reads and embeds all content | Refresh cost and duration grow with content volume | Add changed-date and ETag-based delta synchronization |
+| Medium | Device code flow may be blocked by Conditional Access | Meeting summaries are unavailable in restricted tenants | Validate tenant policy and design an approved delegated or application flow |
+| Medium | One Function hosts interactive and scheduled workloads | Reindexing can contend with chat traffic | Separate indexing when measured latency or scale requires it |
+| Low | GitHub content is absent | Answers cover only Azure DevOps sources | Add a least-privilege GitHub App connector |
+
+## Target architecture
+
+The target separates interactive chat, background ingestion, and real-time meeting
+media. Shared retrieval and governance services support every channel.
 
 ```mermaid
 flowchart TB
-    subgraph Sources
-        ADO[Azure DevOps Work Items]
-        GH[GitHub Issues, PRs, Code]
+    subgraph Sources[Knowledge sources]
+        ADO[Azure DevOps]
+        GitHub[GitHub]
         Wiki[Azure DevOps Wiki]
     end
 
-    subgraph Ingestion
-        Connectors[Sync Connectors]
-        Indexer[Azure AI Search Indexer]
+    subgraph Ingestion[Background ingestion]
+        Connectors[Incremental connectors]
+        Queue[Change queue]
+        Indexer[Chunk and embed workers]
     end
 
-    subgraph KnowledgeStore
-        Search[Azure AI Search Index]
+    subgraph Knowledge[Knowledge and AI]
+        Search[(Production AI Search)]
+        Agent[Foundry agent]
+        Eval[Evaluation and tracing]
     end
 
-    subgraph AgentLayer
-        Agent[Foundry Hosted Agent]
+    subgraph Channels[User channels]
+        Chat[Teams chat bot]
+        Meeting[Teams media bot]
+        Suggestions[Meeting suggestion service]
     end
 
-    subgraph Channels
-        ChatBot[Teams Chat Bot]
-        MeetingBot[Teams Meeting Bot]
+    subgraph Governance[Security and operations]
+        Identity[Managed identities and OAuth]
+        Vault[Key Vault]
+        Monitor[Azure Monitor]
+        State[(Durable session state)]
     end
 
-    Sources --> Connectors --> Indexer --> Search
-    Search --> Agent
-    Agent --> ChatBot
-    Agent --> MeetingBot
-    MeetingBot -- live transcript --> Agent
-    Agent -- live suggestion --> MeetingBot
-    Agent -- meeting notes after call ends --> Wiki
+    ADO --> Connectors
+    GitHub --> Connectors
+    Wiki --> Connectors
+    Connectors --> Queue --> Indexer --> Search
+    Search <--> Agent
+    Agent <--> Chat
+    Meeting -- live transcript --> Suggestions
+    Suggestions <--> Agent
+    Agent -- approved notes --> Wiki
+    Identity --> Connectors
+    Identity --> Chat
+    Identity --> Meeting
+    Vault --> Connectors
+    Chat <--> State
+    Agent --> Eval
+    Chat --> Monitor
+    Meeting --> Monitor
+
+    classDef source fill:#DCFCE7,stroke:#15803D,color:#111827
+    classDef processing fill:#FFF4CE,stroke:#C19C00,color:#111827
+    classDef ai fill:#F3E8FF,stroke:#7E22CE,color:#111827
+    classDef channel fill:#DDEBFF,stroke:#2563EB,color:#111827
+    classDef governance fill:#FEE2E2,stroke:#B91C1C,color:#111827
+
+    class ADO,GitHub,Wiki source
+    class Connectors,Queue,Indexer processing
+    class Search,Agent,Eval ai
+    class Chat,Meeting,Suggestions channel
+    class Identity,Vault,Monitor,State governance
 ```
+
+## Delivery roadmap
+
+| Stage | Outcome | Exit criteria |
+|-------|---------|---------------|
+| 1. Harden the pilot | Secure and reliable current capabilities | PAT rotated, secrets externalized, durable sessions, meeting test passed, alerting enabled |
+| 2. Improve knowledge operations | Scalable and measurable retrieval | Delta indexing, production Search tier, representative Q&A evaluation suite |
+| 3. Expand source coverage | Unified engineering knowledge | GitHub issues, pull requests, and selected code indexed with source filters |
+| 4. Enable live assistance | Timely suggestions during meetings | Media bot validated, consent model approved, relevance thresholds measured, suggest-only rollout completed |
+
+## Key architecture decisions
+
+| Decision | Rationale | Revisit when |
+|----------|-----------|--------------|
+| Modular monolith on Azure Functions | Minimizes pilot cost and operational overhead | Indexing affects chat latency or workloads need independent scaling |
+| Hybrid retrieval before live API fallback | Improves semantic recall while retaining precise source lookup | Evaluation shows another retrieval strategy performs better |
+| Post-meeting transcripts before live audio | Delivers summary value without a media bot service | Live suggestions receive funding and governance approval |
+| Delegated meeting access | Preserves user context and avoids broad tenant-wide access | Organization-wide meeting automation is approved |
+| Human-visible citations | Supports trust, verification, and source navigation | This remains a permanent product requirement |
+
+## Presentation summary
+
+Knowledge IQ has a working Azure DevOps Q&A foundation and a pilot meeting-summary
+workflow. The architecture deliberately favors low operational cost and rapid
+validation. Production readiness depends on credential remediation, durable state,
+measured retrieval quality, and a completed real-meeting test. GitHub ingestion and
+live meeting suggestions are clear next-stage capabilities, not features of the
+current deployment.
