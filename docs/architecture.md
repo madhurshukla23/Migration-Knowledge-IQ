@@ -122,7 +122,7 @@ calls provide a fallback when indexed results are insufficient and provide detai
 lookups for a known work item ID or wiki path.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "22px"}, "sequence": {"actorFontSize": 22, "messageFontSize": 20, "noteFontSize": 20, "sequenceNumberFontSize": 16}}}%%
+%%{init: {"themeVariables": {"fontSize": "26px"}, "sequence": {"actorFontSize": 26, "messageFontSize": 24, "noteFontSize": 24, "sequenceNumberFontSize": 20}}}%%
 sequenceDiagram
     autonumber
     actor User as Teams user
