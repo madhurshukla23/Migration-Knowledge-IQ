@@ -53,6 +53,7 @@ Q&A and meeting summarization share the same Foundry model integration but follo
 separate processing paths.
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}}}%%
 flowchart LR
     User([Teams user])
 
@@ -89,12 +90,12 @@ flowchart LR
     Function <--> Session
     Function <--> Pending
 
-    classDef user fill:#E8F3FF,stroke:#0067B8,color:#111827
-    classDef channel fill:#DDEBFF,stroke:#2563EB,color:#111827
-    classDef runtime fill:#FFF4CE,stroke:#C19C00,color:#111827
-    classDef ai fill:#F3E8FF,stroke:#7E22CE,color:#111827
-    classDef data fill:#DCFCE7,stroke:#15803D,color:#111827
-    classDef identity fill:#FCE7F3,stroke:#BE185D,color:#111827
+    classDef user fill:#E8F3FF,stroke:#0067B8,color:#111827,font-weight:bold
+    classDef channel fill:#DDEBFF,stroke:#2563EB,color:#111827,font-weight:bold
+    classDef runtime fill:#FFF4CE,stroke:#C19C00,color:#111827,font-weight:bold
+    classDef ai fill:#F3E8FF,stroke:#7E22CE,color:#111827,font-weight:bold
+    classDef data fill:#DCFCE7,stroke:#15803D,color:#111827,font-weight:bold
+    classDef identity fill:#FCE7F3,stroke:#BE185D,color:#111827,font-weight:bold
 
     class User user
     class Teams,Bot channel
@@ -121,14 +122,15 @@ calls provide a fallback when indexed results are insufficient and provide detai
 lookups for a known work item ID or wiki path.
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}, "sequence": {"actorFontSize": 18, "messageFontSize": 16, "noteFontSize": 16, "sequenceNumberFontSize": 14}}}%%
 sequenceDiagram
     autonumber
-    actor User as Teams user
-    participant Bot as Azure Bot Service
-    participant App as Function App
-    participant Model as Foundry model
-    participant Search as Azure AI Search
-    participant ADO as Azure DevOps
+    actor User as <b>Teams user</b>
+    participant Bot as <b>Azure Bot Service</b>
+    participant App as <b>Function App</b>
+    participant Model as <b>Foundry model</b>
+    participant Search as <b>Azure AI Search</b>
+    participant ADO as <b>Azure DevOps</b>
 
     User->>Bot: Ask a project question
     Bot->>App: Send authenticated activity
@@ -166,6 +168,7 @@ call or process live audio. The meeting organizer authorizes transcript access b
 using the device code flow.
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}, "sequence": {"actorFontSize": 18, "messageFontSize": 16, "noteFontSize": 16, "sequenceNumberFontSize": 14}}}%%
 sequenceDiagram
     autonumber
     actor User as Meeting organizer
@@ -214,6 +217,7 @@ criterion.
 ## Security and data boundaries
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}}}%%
 flowchart LR
     subgraph UserBoundary[User identity boundary]
         User([Teams user])
@@ -299,6 +303,7 @@ The target separates interactive chat, background ingestion, and real-time meeti
 media. Shared retrieval and governance services support every channel.
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "18px"}}}%%
 flowchart TB
     subgraph Sources[Knowledge sources]
         ADO[Azure DevOps]
