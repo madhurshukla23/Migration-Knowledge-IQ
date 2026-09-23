@@ -125,12 +125,22 @@ lookups for a known work item ID or wiki path.
 %%{init: {"themeVariables": {"fontSize": "18px"}, "sequence": {"actorFontSize": 18, "messageFontSize": 16, "noteFontSize": 16, "sequenceNumberFontSize": 14}}}%%
 sequenceDiagram
     autonumber
-    actor User as Teams user
-    participant Bot as Azure Bot Service
-    participant App as Function App
-    participant Model as Foundry model
-    participant Search as Azure AI Search
-    participant ADO as Azure DevOps
+    box rgb(232, 243, 255) User
+        actor User as Teams user
+    end
+    box rgb(221, 235, 255) Teams channel
+        participant Bot as Azure Bot Service
+    end
+    box rgb(255, 244, 206) Application runtime
+        participant App as Function App
+    end
+    box rgb(243, 232, 255) AI and retrieval
+        participant Model as Foundry model
+        participant Search as Azure AI Search
+    end
+    box rgb(220, 252, 231) Enterprise data
+        participant ADO as Azure DevOps
+    end
 
     User->>Bot: Ask a project question
     Bot->>App: Send authenticated activity
