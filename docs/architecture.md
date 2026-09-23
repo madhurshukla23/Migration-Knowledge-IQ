@@ -125,12 +125,12 @@ lookups for a known work item ID or wiki path.
 %%{init: {"themeVariables": {"fontSize": "18px"}, "sequence": {"actorFontSize": 18, "messageFontSize": 16, "noteFontSize": 16, "sequenceNumberFontSize": 14}}}%%
 sequenceDiagram
     autonumber
-    actor User as <b>Teams user</b>
-    participant Bot as <b>Azure Bot Service</b>
-    participant App as <b>Function App</b>
-    participant Model as <b>Foundry model</b>
-    participant Search as <b>Azure AI Search</b>
-    participant ADO as <b>Azure DevOps</b>
+    actor User as Teams user
+    participant Bot as Azure Bot Service
+    participant App as Function App
+    participant Model as Foundry model
+    participant Search as Azure AI Search
+    participant ADO as Azure DevOps
 
     User->>Bot: Ask a project question
     Bot->>App: Send authenticated activity
