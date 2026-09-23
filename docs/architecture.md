@@ -53,7 +53,7 @@ Q&A and meeting summarization share the same Foundry model integration but follo
 separate processing paths.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "18px"}}}%%
+%%{init: {"themeVariables": {"fontSize": "22px"}}}%%
 flowchart LR
     User([Teams user])
 
