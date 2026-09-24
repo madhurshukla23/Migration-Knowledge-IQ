@@ -16,6 +16,7 @@ from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 
 import ado_client
+import model_retry
 
 _INDEX_NAME = "knowledge-iq-index"
 _EMBEDDING_DEPLOYMENT = "text-embedding-3-small"
@@ -34,13 +35,18 @@ def _embed_text(text: str) -> list[float]:
     token = _credential.get_token("https://cognitiveservices.azure.com/.default").token
     endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
     url = f"{endpoint}/openai/deployments/{_EMBEDDING_DEPLOYMENT}/embeddings?api-version=2024-02-01"
-    response = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"input": text[:8000]},
-        timeout=30,
-    )
-    response.raise_for_status()
+
+    def send_request() -> requests.Response:
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"input": text[:8000]},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response
+
+    response = model_retry.run_with_rate_limit_retry_sync(send_request)
     return response.json()["data"][0]["embedding"]
 
 

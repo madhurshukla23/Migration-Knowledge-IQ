@@ -24,6 +24,7 @@ from typing_extensions import Annotated
 import ado_client
 import graph_meeting_client
 import meeting_auth_store
+import model_retry
 import search_indexer
 
 logging.basicConfig(level=logging.INFO)
@@ -134,6 +135,12 @@ def _slugify(text: str, max_length: int = 50) -> str:
     return (slug or "meeting")[:max_length]
 
 
+def _user_error_message(exc: Exception, action: str) -> str:
+    if model_retry.is_rate_limit_error(exc):
+        return "The AI model is busy right now. Please try again in a minute."
+    return f"Sorry, I couldn't {action} because of an internal error. Please try again."
+
+
 async def _summarize_transcript(transcript_text: str) -> str:
     """Turn a raw meeting transcript into structured notes using the model, no tools needed."""
     summarizer = Agent(
@@ -145,7 +152,7 @@ async def _summarize_transcript(transcript_text: str) -> str:
         ),
         default_options={"store": False},
     )
-    response = await summarizer.run(transcript_text)
+    response = await model_retry.run_with_rate_limit_retry(lambda: summarizer.run(transcript_text))
     return response.text or "Summary generation failed."
 
 
@@ -188,7 +195,7 @@ async def _handle_done(activity: Activity) -> None:
         _send_reply(activity, f"Meeting summarized and posted to the wiki: {page['url']}")
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.error("[ERROR] Meeting summarization failed: %s", exc, exc_info=True)
-        _send_reply(activity, f"Sorry, I couldn't summarize that meeting: {exc}")
+        _send_reply(activity, _user_error_message(exc, "summarize that meeting"))
 
 
 def _send_reply(activity: Activity, text: str) -> None:
@@ -285,11 +292,13 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
                 conversation_id = activity.conversation.id
                 session = _sessions.setdefault(conversation_id, AgentSession(session_id=conversation_id))
                 try:
-                    response = await _agent.run(user_text, session=session)
+                    response = await model_retry.run_with_rate_limit_retry(
+                        lambda: _agent.run(user_text, session=session)
+                    )
                     reply_text = response.text or "I couldn't come up with an answer for that."
                 except Exception as exc:  # pylint: disable=broad-exception-caught
                     logger.error("[ERROR] Agent run failed: %s", exc, exc_info=True)
-                    reply_text = f"Sorry, I hit an error answering that: {exc}"
+                    reply_text = _user_error_message(exc, "answer that question")
                 _send_card_reply(activity, reply_text)
         elif activity.type == ActivityTypes.conversation_update:
             for member in activity.members_added or []:
