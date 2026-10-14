@@ -2,7 +2,7 @@
 title: Knowledge IQ Bot Architecture
 description: Presentation-ready current and target architecture for the Knowledge IQ Microsoft Teams bot
 author: Migration-Knowledge-IQ team
-ms.date: 2026-09-21
+ms.date: 2026-10-14
 ms.topic: architecture
 ---
 
@@ -49,12 +49,13 @@ dedicated services as demand grows.
 ## Current architecture
 
 The deployed system uses one Function App as the orchestration and compute boundary.
-Q&A and meeting summarization share the same Foundry model integration but follow
-separate processing paths.
+The diagram maps the deployed Python modules and their actual runtime dependencies.
+Q&A, indexing, and meeting summarization share infrastructure but follow separate
+processing paths.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "22px"}}}%%
-flowchart LR
+%%{init: {"themeVariables": {"fontSize": "20px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 45}}}%%
+flowchart TB
     User([Teams user])
 
     subgraph Channel[Microsoft Teams channel]
@@ -62,33 +63,62 @@ flowchart LR
         Bot[Azure Bot Service]
     end
 
-    subgraph Runtime[Knowledge IQ runtime]
-        Function[Azure Function App]
-        Session[(In-memory Q&A sessions)]
-        Pending[(Pending auth state)]
+    subgraph FunctionApp[Azure Function App: func-knowledgeiq-relay-cpvzgdnu]
+        Messages["function_app.py<br/>messages endpoint<br/>JWT validation and command routing"]
+        QA["Agent Framework Q&A<br/>tools and in-memory sessions"]
+        SearchTool["search_indexer.py<br/>hybrid query"]
+        ADOClient["ado_client.py<br/>live lookup and wiki write"]
+        Reindex["search_indexer.py<br/>full refresh and stale-document pruning"]
+        Meeting["function_app.py<br/>meeting-summary workflow"]
+        GraphClient["graph_meeting_client.py<br/>meeting and transcript client"]
+        AuthStore["meeting_auth_store.py<br/>pending sign-in state"]
     end
 
-    subgraph Intelligence[AI and retrieval]
-        Agent[Foundry chat model]
-        Search[Azure AI Search]
-        Embedding[Embedding model]
+    subgraph Intelligence[Microsoft Foundry and retrieval]
+        Chat["gpt-5.4-mini<br/>Q&A and summarization"]
+        Embedding["text-embedding-3-small<br/>document and query vectors"]
+        Search[("Azure AI Search<br/>knowledge-iq-index")]
     end
 
-    subgraph Enterprise[Enterprise systems]
-        ADO[(Azure DevOps<br/>work items and wiki)]
-        Graph[Microsoft Graph<br/>meeting transcripts]
+    subgraph Enterprise[Enterprise systems and state]
+        ADO[("Azure DevOps<br/>work items and wiki")]
+        Graph["Microsoft Graph<br/>online meetings and transcripts"]
         Identity[Microsoft identity platform]
+        Storage[("Azure Table Storage<br/>PendingMeetingAuth")]
+        Insights[Application Insights]
     end
 
-    User <--> Teams <--> Bot <--> Function
-    Function <--> Agent
-    Function <--> Search
-    Search <--> Embedding
-    Function <--> ADO
-    Function --> Identity
-    Function <--> Graph
-    Function <--> Session
-    Function <--> Pending
+    User <--> Teams <--> Bot <--> Messages
+
+    Messages -->|question| QA
+    QA <-->|managed identity: prompt and answer| Chat
+    QA --> SearchTool
+    SearchTool -->|managed identity: embed query| Embedding
+    SearchTool -->|managed identity: hybrid query| Search
+    QA -. live fallback .-> ADOClient
+    ADOClient <-->|PAT: REST API| ADO
+    QA -->|Adaptive Card answer| Messages
+
+    Messages -->|reindex now| Reindex
+    Timer([6-hour timer]) --> Reindex
+    Reindex -->|read all content| ADOClient
+    Reindex -->|managed identity: embed chunks| Embedding
+    Reindex -->|managed identity: merge, upload, prune| Search
+
+    Messages -->|summarize meeting / done| Meeting
+    Meeting --> GraphClient
+    GraphClient <-->|device code and delegated token| Identity
+    GraphClient <-->|delegated token: meeting and transcript| Graph
+    Meeting -->|managed identity: summarize transcript| Chat
+    Meeting -->|create meeting page| ADOClient
+    Meeting <--> AuthStore
+    AuthStore <-->|storage connection| Storage
+    Meeting -->|status and summary reply| Messages
+
+    Messages -. telemetry .-> Insights
+    QA -. telemetry .-> Insights
+    Reindex -. telemetry .-> Insights
+    Meeting -. telemetry .-> Insights
 
     classDef user fill:#E8F3FF,stroke:#0067B8,color:#111827,font-weight:bold
     classDef channel fill:#DDEBFF,stroke:#2563EB,color:#111827,font-weight:bold
@@ -96,13 +126,15 @@ flowchart LR
     classDef ai fill:#F3E8FF,stroke:#7E22CE,color:#111827,font-weight:bold
     classDef data fill:#DCFCE7,stroke:#15803D,color:#111827,font-weight:bold
     classDef identity fill:#FCE7F3,stroke:#BE185D,color:#111827,font-weight:bold
+    classDef monitor fill:#F3F4F6,stroke:#4B5563,color:#111827,font-weight:bold
 
-    class User user
+    class User,Timer user
     class Teams,Bot channel
-    class Function,Session runtime
-    class Agent,Search,Embedding ai
-    class ADO,Graph,Pending data
+    class Messages,QA,SearchTool,ADOClient,Reindex,Meeting,GraphClient,AuthStore runtime
+    class Chat,Search,Embedding ai
+    class ADO,Graph,Storage data
     class Identity identity
+    class Insights monitor
 ```
 
 ### Diagram color key
@@ -114,6 +146,7 @@ flowchart LR
 | Purple | AI models and retrieval services |
 | Green | Enterprise data and durable application state |
 | Pink | Identity and delegated authorization |
+| Gray | Monitoring and telemetry |
 
 ## Q&A processing flow
 
