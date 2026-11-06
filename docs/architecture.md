@@ -425,7 +425,28 @@ conversation authoring.
 > while moving hosting, scaling, identity, sessions, and agent observability to the
 > managed service.
 
-### Architecture comparison
+### Advantages of the selected implementation
+
+The selected approach has a clear advantage where Knowledge IQ differs from a
+standard conversational agent: custom retrieval and cross-service orchestration.
+
+| Advantage for Knowledge IQ | How the current solution delivers it | Copilot Studio implication | Why it mattered to the decision |
+|----------------------------|--------------------------------------|----------------------------|---------------------------------|
+| Direct control of retrieval quality | Python controls Azure DevOps extraction, chunk size, embeddings, hybrid Search queries, result count, stale-document removal, and source metadata | The existing retrieval service would need to be retained and exposed through a connector, flow, API, or tool | Retrieval behavior is a core product capability rather than a replaceable channel feature |
+| One runtime for custom workflows | The Function App contains Q&A tools, indexing, Graph transcript retrieval, summarization, Wiki write-back, retries, and response rendering | Copilot Studio would orchestrate several of these operations but would still depend on an external custom backend | The pilot avoids operating both a Copilot Studio solution and a separate integration application |
+| Explicit and testable control flow | Source code defines indexed search first, live Azure DevOps fallback second, no-answer behavior, retries, and error handling | Generative orchestration is configuration-driven; reproducing the exact fallback contract requires additional topics, tools, or flows | Predictable grounding and failure behavior are required for trusted engineering answers |
+| Custom delegated meeting authorization | The application owns the device-code exchange, durable pending state, delegated Graph token, transcript conversion, and cleanup | This sequence would require custom connectors, flows, or an external API and would remain application-specific | The meeting workflow could not be implemented only by selecting built-in knowledge sources |
+| Exact citation and Teams response contract | The agent requires source URLs and the bot renders deterministic Adaptive Card source buttons | Copilot Studio supports citations and cards, but customized generative responses require explicit citation rendering | Human-visible evidence is a permanent architecture principle for the solution |
+| Unified engineering lifecycle | Agent instructions, tools, clients, retry policies, and card behavior are versioned and reviewed with the Python application | Power Platform solutions provide ALM, but custom backend code and low-code configuration would have separate release surfaces | One code review and deployment path reduces coordination risk for the current engineering-owned pilot |
+| Model and hosting portability | Agent Framework keeps orchestration in application code while Foundry supplies the model endpoint | Moving orchestration into Copilot Studio increases dependence on its harness, topics, connector model, and billing construct | The team can change models or move the same code to Foundry Agent Service without rewriting the business workflow |
+| Reuse of existing implementation assets | The Azure DevOps client, Search indexer, Graph client, retry helper, and Adaptive Card renderer are composed directly | Each asset would need to be wrapped, replaced, or invoked across the Copilot Studio boundary | Reuse shortened pilot delivery and avoided migration work that did not add user value |
+| Application-level troubleshooting | Application Insights logs capture Python exceptions, API failures, retries, and indexing outcomes at the point of execution | Copilot Studio offers platform analytics, but failures in retained custom services still require separate telemetry | A single diagnostic path is valuable while integration behavior is still being validated |
+
+The advantage is therefore not that Copilot Studio is incapable. The current
+implementation avoids an additional orchestration layer around custom services that
+the solution must operate in either design.
+
+### Broader platform comparison
 
 | Decision area | Current code-first implementation | Copilot Studio implementation | Review implication |
 |---------------|-----------------------------------|-------------------------------|--------------------|
@@ -439,24 +460,6 @@ conversation authoring.
 | Application lifecycle | Git review, Python tests, Azure deployment, and direct dependency management | Power Platform solutions, environments, pipelines, sharing, and administrative inventory | The better fit depends on whether engineering or Power Platform teams own the product |
 | Observability and quality | Application Insights plus application-defined logs and future evaluation work | Built-in analytics and evaluations, with platform-level administration | Copilot Studio starts with more product analytics; code requires deliberate telemetry and evaluation investment |
 | Cost model | Azure Functions, Foundry model usage, Azure AI Search, Storage, Bot Service, and monitoring consumption | Copilot Studio licensing or Copilot Credits, plus premium connectors and any retained Azure services | A measured workload estimate is required; neither option is inherently lower cost |
-
-### Why the pilot selected the code-first path
-
-1. The retrieval contract required custom control. The solution owns chunking,
-    embeddings, hybrid ranking, stale-document removal, source URLs, and live Azure
-    DevOps fallback behavior.
-2. The meeting workflow required application-specific orchestration. The device-code
-    exchange, pending authorization state, transcript conversion, summarization, and
-    Wiki write-back form one controlled transaction across Graph and Azure DevOps.
-3. The application needed predictable source handling. Python code explicitly
-    requires citations, creates source buttons, prevents unsupported guesses, and
-    exposes operational failures through application telemetry.
-4. Existing engineering assets were reusable. The Azure DevOps client, search
-    indexer, Graph client, retry policy, and Adaptive Card renderer could be composed
-    directly rather than wrapped individually as connectors or flows.
-5. Model and hosting choices remain separable. The team can change models, move the
-    Python agent to Foundry Agent Service, or expose tools through OpenAPI or MCP
-    without redesigning the business workflow.
 
 The tradeoff is explicit: we accepted more code, infrastructure, testing, security,
 and operational ownership in exchange for control over the parts that differentiate
