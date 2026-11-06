@@ -13,6 +13,28 @@ class AdoConfigError(RuntimeError):
     """Raised when required Azure DevOps environment variables are missing."""
 
 
+class AdoAuthenticationError(RuntimeError):
+    """Raised when Azure DevOps rejects the configured PAT."""
+
+
+class AdoAuthorizationError(RuntimeError):
+    """Raised when the configured PAT lacks a required scope."""
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    if response.status_code == 401:
+        raise AdoAuthenticationError(
+            "Azure DevOps rejected ADO_PAT (HTTP 401). The token may be expired or revoked; "
+            "replace the Function App's ADO_PAT setting with a valid token."
+        )
+    if response.status_code == 403:
+        raise AdoAuthorizationError(
+            "ADO_PAT is authenticated but lacks permission for this operation (HTTP 403). "
+            "Verify its Work Items and Wiki scopes."
+        )
+    response.raise_for_status()
+
+
 def _org_url() -> str:
     value = os.environ.get("ADO_ORG_URL")
     if not value:
@@ -51,7 +73,7 @@ def search_work_items(query_text: str, top: int = 10) -> list[dict]:
         )
     }
     response = requests.post(wiql_url, json=wiql, auth=_auth(), timeout=30)
-    response.raise_for_status()
+    _raise_for_status(response)
     ids = [str(item["id"]) for item in response.json().get("workItems", [])[:top]]
     if not ids:
         return []
@@ -71,7 +93,7 @@ def list_all_work_items() -> list[dict]:
     wiql_url = f"{_org_url()}/{_project()}/_apis/wit/wiql?api-version={API_VERSION}"
     wiql = {"query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{_project()}'"}
     response = requests.post(wiql_url, json=wiql, auth=_auth(), timeout=30)
-    response.raise_for_status()
+    _raise_for_status(response)
     ids = [str(item["id"]) for item in response.json().get("workItems", [])]
     if not ids:
         return []
@@ -87,7 +109,7 @@ def _get_work_items_by_ids(ids: list[str]) -> list[dict]:
         f"?ids={','.join(ids)}&$expand=all&api-version={API_VERSION}"
     )
     response = requests.get(url, auth=_auth(), timeout=30)
-    response.raise_for_status()
+    _raise_for_status(response)
     results = []
     for item in response.json().get("value", []):
         fields = item.get("fields", {})
@@ -116,7 +138,7 @@ def _list_wiki_paths(wiki_id: str) -> list[str]:
         f"?path=/&recursionLevel=full&api-version={API_VERSION}"
     )
     response = requests.get(url, auth=_auth(), timeout=30)
-    response.raise_for_status()
+    _raise_for_status(response)
     paths: list[str] = []
 
     def walk(node: dict) -> None:
@@ -139,7 +161,7 @@ def search_wiki(query_text: str, top: int = 10) -> list[dict]:
     )
     body = {"searchText": query_text, "$top": top}
     response = requests.post(search_url, json=body, auth=_auth(), timeout=30)
-    response.raise_for_status()
+    _raise_for_status(response)
     payload = response.json()
     results = []
     for result in payload.get("results", []):
@@ -180,7 +202,7 @@ def get_wiki_page(path: str, wiki_identifier: str | None = None) -> dict:
         auth=_auth(),
         timeout=30,
     )
-    response.raise_for_status()
+    _raise_for_status(response)
     payload = response.json()
     return {
         "path": payload.get("path"),
@@ -200,7 +222,7 @@ def create_wiki_page(path: str, content: str) -> dict:
         auth=_auth(),
         timeout=30,
     )
-    response.raise_for_status()
+    _raise_for_status(response)
     payload = response.json()
     return {
         "path": payload.get("path"),

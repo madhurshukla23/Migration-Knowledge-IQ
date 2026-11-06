@@ -2,7 +2,7 @@
 title: Knowledge IQ Bot Architecture
 description: Presentation-ready current and target architecture for the Knowledge IQ Microsoft Teams bot
 author: Migration-Knowledge-IQ team
-ms.date: 2026-10-14
+ms.date: 2026-11-06
 ms.topic: architecture
 ---
 
@@ -297,8 +297,8 @@ flowchart LR
 * Meeting access is delegated to the organizer and limited to transcript read scope.
 * Pending device codes are stored in Azure Table Storage and deleted after token
   redemption or terminal failure.
-* The Azure DevOps PAT is the main credential risk. It is shared by read and write
-  paths and must be rotated because it has previously been exposed.
+* The Azure DevOps PAT was rotated after its previous exposure. It remains the main
+    credential risk because one shared secret serves read and write paths.
 * Meeting transcripts and summaries can contain sensitive information. Retention,
   access control, and consent requirements must be agreed before production rollout.
 
@@ -321,7 +321,7 @@ All current resources are deployed in `eastus2` within resource group
 
 | Priority | Constraint or risk | Impact | Recommended action |
 |----------|--------------------|--------|--------------------|
-| High | Azure DevOps uses a shared PAT | Broad credential exposure affects read and write operations | Rotate immediately, store in Key Vault, then replace with scoped OAuth or workload identity |
+| High | Azure DevOps uses a shared PAT | Broad credential exposure affects read and write operations | Store the rotated secret in Key Vault, then replace it with scoped OAuth or workload identity |
 | High | Q&A sessions are held in Function memory | Context is lost on restart or scale-out | Move session state to Cosmos DB or another durable distributed store |
 | High | Meeting workflow is not validated end to end in production | Pilot capability may fail under real tenant policies or transcript conditions | Run a scripted organizer meeting test and capture operational evidence |
 | Medium | Search runs on the Free tier | No SLA and limited capacity | Establish volume and availability targets, then select a production tier |
@@ -409,6 +409,104 @@ flowchart TB
 | 3. Expand source coverage | Unified engineering knowledge | GitHub issues, pull requests, and selected code indexed with source filters |
 | 4. Enable live assistance | Timely suggestions during meetings | Media bot validated, consent model approved, relevance thresholds measured, suggest-only rollout completed |
 
+## Copilot Studio alternative assessment
+
+Copilot Studio is a viable implementation option, particularly when low-code
+authoring, rapid Microsoft 365 distribution, and business-maker ownership are the
+primary requirements. We selected a code-first implementation because the pilot's
+hardest requirements were custom integration and orchestration rather than
+conversation authoring.
+
+> [!IMPORTANT]
+> The current solution runs Microsoft Agent Framework inside Azure Functions and
+> calls models through a Microsoft Foundry project endpoint. It is not currently a
+> persisted prompt agent or hosted agent in Microsoft Foundry Agent Service. A
+> future migration to a Foundry hosted agent could retain the Python orchestration
+> while moving hosting, scaling, identity, sessions, and agent observability to the
+> managed service.
+
+### Architecture comparison
+
+| Decision area | Current code-first implementation | Copilot Studio implementation | Review implication |
+|---------------|-----------------------------------|-------------------------------|--------------------|
+| Primary authoring model | Python, Agent Framework, and source-controlled infrastructure | Graphical low-code authoring with agents, topics, tools, workflows, and agent flows | Copilot Studio reduces specialist development effort; code provides finer implementation control |
+| Teams delivery | Azure Bot Service, Teams app manifest, and a custom Function endpoint | Managed publishing to Teams, Microsoft Copilot, and the organizational app catalog | Copilot Studio provides the simpler channel and distribution path |
+| Knowledge retrieval | Custom Azure DevOps ingestion, chunking, embeddings, hybrid Azure AI Search, citations, and live API fallback | Built-in knowledge is strongest for SharePoint, Dataverse, uploaded files, websites, and Microsoft Copilot connectors; other retrieval paths require connectors, tools, flows, or custom data patterns | The current Azure DevOps and Azure AI Search strategy maps more directly to code than to built-in Copilot Studio knowledge |
+| Tool orchestration | Explicit Python tools, prompts, fallback rules, retries, and error handling | Platform orchestration selects knowledge, topics, connectors, and flows from configured descriptions and instructions | Code improves determinism and debuggability; Copilot Studio accelerates standard business actions |
+| Meeting workflow | Custom device-code OAuth, Microsoft Graph transcript retrieval, durable pending state, model summarization, and Azure DevOps Wiki write-back | Topics and flows can coordinate supported connectors, but this delegated Graph sequence and Azure DevOps write-back would still require custom connectors, flows, or an external API | Copilot Studio would not eliminate the custom integration boundary |
+| Response experience | Adaptive Cards and source buttons are constructed directly from model output | Native messages and cards are easier to author, but customized generative answers require explicit citation rendering | Both can meet the experience; code gives exact control over card and citation behavior |
+| Identity and data access | Managed identity for Azure services, delegated Graph token, and a scoped Azure DevOps credential | Microsoft Entra user authentication, connection references, connector policies, environments, and Power Platform data-loss prevention controls | Copilot Studio provides stronger low-code governance; custom identities still require careful connector design |
+| Application lifecycle | Git review, Python tests, Azure deployment, and direct dependency management | Power Platform solutions, environments, pipelines, sharing, and administrative inventory | The better fit depends on whether engineering or Power Platform teams own the product |
+| Observability and quality | Application Insights plus application-defined logs and future evaluation work | Built-in analytics and evaluations, with platform-level administration | Copilot Studio starts with more product analytics; code requires deliberate telemetry and evaluation investment |
+| Cost model | Azure Functions, Foundry model usage, Azure AI Search, Storage, Bot Service, and monitoring consumption | Copilot Studio licensing or Copilot Credits, plus premium connectors and any retained Azure services | A measured workload estimate is required; neither option is inherently lower cost |
+
+### Why the pilot selected the code-first path
+
+1. The retrieval contract required custom control. The solution owns chunking,
+    embeddings, hybrid ranking, stale-document removal, source URLs, and live Azure
+    DevOps fallback behavior.
+2. The meeting workflow required application-specific orchestration. The device-code
+    exchange, pending authorization state, transcript conversion, summarization, and
+    Wiki write-back form one controlled transaction across Graph and Azure DevOps.
+3. The application needed predictable source handling. Python code explicitly
+    requires citations, creates source buttons, prevents unsupported guesses, and
+    exposes operational failures through application telemetry.
+4. Existing engineering assets were reusable. The Azure DevOps client, search
+    indexer, Graph client, retry policy, and Adaptive Card renderer could be composed
+    directly rather than wrapped individually as connectors or flows.
+5. Model and hosting choices remain separable. The team can change models, move the
+    Python agent to Foundry Agent Service, or expose tools through OpenAPI or MCP
+    without redesigning the business workflow.
+
+The tradeoff is explicit: we accepted more code, infrastructure, testing, security,
+and operational ownership in exchange for control over the parts that differentiate
+this solution.
+
+### Where Copilot Studio would be the better choice
+
+Copilot Studio should be preferred when most requirements use supported Microsoft
+365 or Power Platform knowledge and connectors, business makers must own frequent
+conversation changes, managed Teams and Microsoft Copilot publishing is a priority,
+or platform analytics and governance outweigh low-level orchestration control.
+
+It also remains a valid front end for a hybrid architecture. The current retrieval
+and meeting capabilities could be exposed as secured APIs, connectors, or MCP tools,
+while Copilot Studio owns conversation authoring and Microsoft 365 distribution.
+This option becomes attractive when reuse by multiple agents provides enough value
+to justify the additional platform boundary.
+
+### Revisit criteria
+
+Reassess the choice when one or more of these conditions becomes true:
+
+* Most knowledge moves to SharePoint, Dataverse, or supported Microsoft Copilot
+  connectors
+* A Power Platform team assumes product ownership and needs low-code release cycles
+* The organization standardizes agent governance and chargeback on Copilot Studio
+* Teams and Microsoft Copilot distribution effort becomes a larger cost than custom
+  orchestration
+* The custom backend is exposed as reusable APIs or MCP tools, reducing migration
+  effort
+* A workload-based cost estimate shows a material Copilot Studio advantage
+
+### Decision statement for the review board
+
+We did not select the code-first approach because Copilot Studio lacks agent or
+Teams capabilities. We selected it because the pilot's differentiating behavior is
+implemented in custom Azure DevOps retrieval and a delegated Microsoft Graph meeting
+workflow. Implementing those capabilities in Copilot Studio would still require
+custom connectors, flows, or hosted APIs, while adding a second application lifecycle.
+The decision should be revisited if the product shifts toward standard Microsoft 365
+knowledge, low-code ownership, or broad Copilot distribution.
+
+### Product references
+
+* [Copilot Studio overview](https://learn.microsoft.com/microsoft-copilot-studio/fundamentals-what-is-copilot-studio)
+* [Copilot Studio knowledge sources](https://learn.microsoft.com/microsoft-copilot-studio/knowledge-copilot-studio)
+* [Publish Copilot Studio agents to Teams and Microsoft Copilot](https://learn.microsoft.com/microsoft-copilot-studio/publication-add-bot-to-microsoft-teams)
+* [Copilot Studio licensing and plans](https://learn.microsoft.com/microsoft-copilot-studio/requirements-licensing-subscriptions)
+* [Microsoft Foundry Agent Service overview](https://learn.microsoft.com/azure/foundry/agents/overview)
+
 ## Key architecture decisions
 
 | Decision | Rationale | Revisit when |
@@ -418,6 +516,7 @@ flowchart TB
 | Post-meeting transcripts before live audio | Delivers summary value without a media bot service | Live suggestions receive funding and governance approval |
 | Delegated meeting access | Preserves user context and avoids broad tenant-wide access | Organization-wide meeting automation is approved |
 | Human-visible citations | Supports trust, verification, and source navigation | This remains a permanent product requirement |
+| Code-first Agent Framework with Foundry models over Copilot Studio | Keeps custom retrieval, Graph orchestration, citations, and error handling in one source-controlled runtime | Standard Microsoft 365 knowledge, low-code ownership, or managed Copilot distribution becomes the dominant requirement |
 
 ## Presentation summary
 
