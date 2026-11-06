@@ -465,6 +465,30 @@ The tradeoff is explicit: we accepted more code, infrastructure, testing, securi
 and operational ownership in exchange for control over the parts that differentiate
 this solution.
 
+### Teams meeting capability boundary
+
+Copilot Studio support for Teams meeting chat must not be confused with access to
+the meeting's live media stream. Copilot Studio voice agents target IVR and contact
+center scenarios through telephony; they do not provide raw Teams meeting audio to
+an agent.
+
+| Meeting capability | Copilot Studio alone | Required implementation |
+|--------------------|----------------------|-------------------------|
+| Participate in meeting chat | Supported when the agent is enabled for group and meeting chats; users can invoke it and it can use permitted chat history | Publish the agent to Teams and enable meeting-chat use |
+| Respond to a chat question during the meeting | Supported | A user sends a message or mentions the agent in the meeting chat |
+| Read the completed meeting transcript | Not a native live knowledge feed; it can call a connector, flow, or API that retrieves the transcript | Microsoft Graph transcript permissions plus a custom connector, flow, or service |
+| Stream the live transcript while people speak | Not supported through the standard Copilot Studio Teams channel; Graph transcript artifacts are generated for post-meeting retrieval | A separate supported real-time transcription source and custom integration would be required |
+| Listen to raw meeting audio | Not supported | An application-hosted Teams media bot is the direct-media option, requiring Graph calling permissions, the Real-time Media library, C# or .NET, and Windows hosting |
+| Speak into the meeting audio | Not supported through the standard Copilot Studio Teams channel | A calling or media bot capable of sending audio into the meeting |
+| Post a response triggered by spoken discussion | Not supported by Copilot Studio alone because it does not receive the spoken discussion | A custom transcript or media service detects the trigger, invokes the agent, and posts through a Teams bot or approved proactive-message path |
+| Generate a post-meeting summary and actions | Supported through tools or flows, but transcript access and destination write-back still need configured integrations | Graph transcript retrieval plus Copilot Studio tools, Power Automate, or a custom service |
+
+For this solution, the recommended near-term pattern remains post-meeting Graph
+transcript processing. If live assistance is required, the lower-complexity option
+is an agent invoked in meeting chat. Raw-audio processing should be treated as a
+separate specialized architecture with explicit consent, compliance, hosting, and
+operational approval, not as a Copilot Studio configuration change.
+
 ### Where Copilot Studio would be the better choice
 
 Copilot Studio should be preferred when most requirements use supported Microsoft
@@ -509,6 +533,9 @@ knowledge, low-code ownership, or broad Copilot distribution.
 * [Publish Copilot Studio agents to Teams and Microsoft Copilot](https://learn.microsoft.com/microsoft-copilot-studio/publication-add-bot-to-microsoft-teams)
 * [Copilot Studio licensing and plans](https://learn.microsoft.com/microsoft-copilot-studio/requirements-licensing-subscriptions)
 * [Microsoft Foundry Agent Service overview](https://learn.microsoft.com/azure/foundry/agents/overview)
+* [Teams calls and meeting bots](https://learn.microsoft.com/microsoftteams/platform/bots/calls-and-meetings/calls-meetings-bots-overview)
+* [Teams real-time media concepts](https://learn.microsoft.com/microsoftteams/platform/bots/calls-and-meetings/real-time-media-concepts)
+* [Teams transcript and recording APIs](https://learn.microsoft.com/microsoftteams/platform/graph-api/meeting-transcripts/overview-transcripts)
 
 ## Key architecture decisions
 
