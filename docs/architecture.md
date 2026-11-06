@@ -425,26 +425,32 @@ conversation authoring.
 > while moving hosting, scaling, identity, sessions, and agent observability to the
 > managed service.
 
-### Advantages of the selected implementation
+### Required feature comparison
 
-The selected approach has a clear advantage where Knowledge IQ differs from a
-standard conversational agent: custom retrieval and cross-service orchestration.
+The comparison focuses on the features Knowledge IQ must deliver. "Not native"
+means the requirement can be implemented only by adding a connector, flow, or
+hosted service outside Copilot Studio. "Not supported" means the standard Copilot
+Studio Teams channel does not expose the required meeting capability.
 
-| Advantage for Knowledge IQ | How the current solution delivers it | Copilot Studio implication | Why it mattered to the decision |
-|----------------------------|--------------------------------------|----------------------------|---------------------------------|
-| Direct control of retrieval quality | Python controls Azure DevOps extraction, chunk size, embeddings, hybrid Search queries, result count, stale-document removal, and source metadata | The existing retrieval service would need to be retained and exposed through a connector, flow, API, or tool | Retrieval behavior is a core product capability rather than a replaceable channel feature |
-| One runtime for custom workflows | The Function App contains Q&A tools, indexing, Graph transcript retrieval, summarization, Wiki write-back, retries, and response rendering | Copilot Studio would orchestrate several of these operations but would still depend on an external custom backend | The pilot avoids operating both a Copilot Studio solution and a separate integration application |
-| Explicit and testable control flow | Source code defines indexed search first, live Azure DevOps fallback second, no-answer behavior, retries, and error handling | Generative orchestration is configuration-driven; reproducing the exact fallback contract requires additional topics, tools, or flows | Predictable grounding and failure behavior are required for trusted engineering answers |
-| Custom delegated meeting authorization | The application owns the device-code exchange, durable pending state, delegated Graph token, transcript conversion, and cleanup | This sequence would require custom connectors, flows, or an external API and would remain application-specific | The meeting workflow could not be implemented only by selecting built-in knowledge sources |
-| Exact citation and Teams response contract | The agent requires source URLs and the bot renders deterministic Adaptive Card source buttons | Copilot Studio supports citations and cards, but customized generative responses require explicit citation rendering | Human-visible evidence is a permanent architecture principle for the solution |
-| Unified engineering lifecycle | Agent instructions, tools, clients, retry policies, and card behavior are versioned and reviewed with the Python application | Power Platform solutions provide ALM, but custom backend code and low-code configuration would have separate release surfaces | One code review and deployment path reduces coordination risk for the current engineering-owned pilot |
-| Model and hosting portability | Agent Framework keeps orchestration in application code while Foundry supplies the model endpoint | Moving orchestration into Copilot Studio increases dependence on its harness, topics, connector model, and billing construct | The team can change models or move the same code to Foundry Agent Service without rewriting the business workflow |
-| Reuse of existing implementation assets | The Azure DevOps client, Search indexer, Graph client, retry helper, and Adaptive Card renderer are composed directly | Each asset would need to be wrapped, replaced, or invoked across the Copilot Studio boundary | Reuse shortened pilot delivery and avoided migration work that did not add user value |
-| Application-level troubleshooting | Application Insights logs capture Python exceptions, API failures, retries, and indexing outcomes at the point of execution | Copilot Studio offers platform analytics, but failures in retained custom services still require separate telemetry | A single diagnostic path is valuable while integration behavior is still being validated |
+| Required Knowledge IQ feature | Copilot Studio alone | Why it does not meet the requirement | Custom implementation still required |
+|-------------------------------|----------------------|--------------------------------------|--------------------------------------|
+| Ground answers in Azure DevOps work items and Wiki pages | Not native | Azure DevOps content is not a first-class Copilot Studio knowledge source with the required work-item and Wiki metadata contract | Azure DevOps extraction API, connector, or indexed retrieval service |
+| Control chunking, embeddings, hybrid ranking, filters, and result count | Not native | Built-in generative orchestration does not expose the complete retrieval pipeline needed to tune and evaluate ranking behavior | Custom indexer, embedding calls, and Azure AI Search query logic |
+| Refresh all content every six hours and on demand, then remove stale documents | Not native | Copilot Studio knowledge refresh does not implement this application-defined indexing and deletion workflow | Timer-triggered indexer, on-demand command, and stale-document pruning |
+| Fall back from indexed search to live Azure DevOps lookup | Not native | The exact search-first, live-API-second sequence and no-answer contract require explicit orchestration | Source-controlled tools, fallback rules, retries, and error handling |
+| Return exact source links in a controlled Teams Adaptive Card | Partially supported | Copilot Studio can show citations and cards, but the required source-button contract and deterministic rendering need custom response construction | Citation validation and Adaptive Card renderer |
+| Retrieve a completed meeting transcript with organizer authorization | Not native | Copilot Studio does not own the delegated device-code exchange, pending authorization state, Graph transcript retrieval, and token cleanup | Microsoft Graph client, delegated authentication workflow, and durable state |
+| Summarize the transcript and write decisions and actions to Azure DevOps Wiki | Partially supported | The model can summarize text, but transcript acquisition and Azure DevOps Wiki write-back require external actions | Graph transcript service plus Azure DevOps Wiki API or custom connector |
+| Stream the transcript while participants speak | Not supported | The standard Copilot Studio Teams channel receives chat activities, not a live transcript event stream; Graph exposes transcript artifacts for post-meeting retrieval | A separate supported real-time transcription or media integration |
+| Listen to raw Teams meeting audio | Not supported | Copilot Studio voice supports telephony and contact-center scenarios, not raw multiparty Teams meeting media | Application-hosted Teams media bot with Graph calling permissions and the Real-time Media library |
+| Respond automatically when spoken discussion matches a knowledge item | Not supported | Copilot Studio cannot trigger from speech it does not receive through the Teams channel | Live transcript or media service, trigger logic, agent invocation, and proactive Teams messaging |
+| Index future GitHub issues, pull requests, and selected code with source filters | Not native | The required engineering-content normalization, repository filters, and shared ranking contract are application-specific | GitHub ingestion adapter and extension of the shared Search index |
+| Keep all custom workflows in one testable deployment | Not available once extensions are required | Copilot Studio would orchestrate the agent while custom retrieval and meeting services retain separate code, telemetry, security, and releases | A second application lifecycle, or the selected single pro-code runtime |
 
-The advantage is therefore not that Copilot Studio is incapable. The current
-implementation avoids an additional orchestration layer around custom services that
-the solution must operate in either design.
+Copilot Studio can provide the conversational front end in a hybrid design, but it
+does not remove the custom retrieval, meeting, and write-back services. The selected
+implementation keeps those differentiating requirements in one source-controlled
+runtime instead of adding Copilot Studio as a second orchestration and release layer.
 
 ### Broader platform comparison
 
@@ -464,30 +470,6 @@ the solution must operate in either design.
 The tradeoff is explicit: we accepted more code, infrastructure, testing, security,
 and operational ownership in exchange for control over the parts that differentiate
 this solution.
-
-### Teams meeting capability boundary
-
-Copilot Studio support for Teams meeting chat must not be confused with access to
-the meeting's live media stream. Copilot Studio voice agents target IVR and contact
-center scenarios through telephony; they do not provide raw Teams meeting audio to
-an agent.
-
-| Meeting capability | Copilot Studio alone | Required implementation |
-|--------------------|----------------------|-------------------------|
-| Participate in meeting chat | Supported when the agent is enabled for group and meeting chats; users can invoke it and it can use permitted chat history | Publish the agent to Teams and enable meeting-chat use |
-| Respond to a chat question during the meeting | Supported | A user sends a message or mentions the agent in the meeting chat |
-| Read the completed meeting transcript | Not a native live knowledge feed; it can call a connector, flow, or API that retrieves the transcript | Microsoft Graph transcript permissions plus a custom connector, flow, or service |
-| Stream the live transcript while people speak | Not supported through the standard Copilot Studio Teams channel; Graph transcript artifacts are generated for post-meeting retrieval | A separate supported real-time transcription source and custom integration would be required |
-| Listen to raw meeting audio | Not supported | An application-hosted Teams media bot is the direct-media option, requiring Graph calling permissions, the Real-time Media library, C# or .NET, and Windows hosting |
-| Speak into the meeting audio | Not supported through the standard Copilot Studio Teams channel | A calling or media bot capable of sending audio into the meeting |
-| Post a response triggered by spoken discussion | Not supported by Copilot Studio alone because it does not receive the spoken discussion | A custom transcript or media service detects the trigger, invokes the agent, and posts through a Teams bot or approved proactive-message path |
-| Generate a post-meeting summary and actions | Supported through tools or flows, but transcript access and destination write-back still need configured integrations | Graph transcript retrieval plus Copilot Studio tools, Power Automate, or a custom service |
-
-For this solution, the recommended near-term pattern remains post-meeting Graph
-transcript processing. If live assistance is required, the lower-complexity option
-is an agent invoked in meeting chat. Raw-audio processing should be treated as a
-separate specialized architecture with explicit consent, compliance, hosting, and
-operational approval, not as a Copilot Studio configuration change.
 
 ### Where Copilot Studio would be the better choice
 
